@@ -907,6 +907,9 @@ struct Entry {
     linked: bool,
     /// The identical file was already in the destination before this run.
     existed: bool,
+    /// XMP sidecar this run wrote (tags on Windows).
+    #[serde(default)]
+    sidecar: Option<PathBuf>,
 }
 
 /// Content hash used to verify every copy before an original is removed.
@@ -949,8 +952,32 @@ fn make_link(target: &Path, at: &Path) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        std::os::windows::fs::symlink_file(target, at)
+        // Symlinks need Developer Mode / admin; a hard link (same drive) works for
+        // everyone and, like a symlink, costs no space.
+        std::os::windows::fs::symlink_file(target, at).or_else(|_| std::fs::hard_link(target, at))
     }
+}
+
+/// Keywords as an XMP sidecar (`IMG_0412.CR3.xmp`): read by Lightroom, Capture One,
+/// Bridge and darktable. Used for tags on Windows, which has no Finder-style tags.
+/// Never overwrites an existing sidecar. Returns the path written.
+pub fn write_xmp(file: &Path, tags: &[String]) -> Option<PathBuf> {
+    if tags.is_empty() {
+        return None;
+    }
+    let mut name = file.file_name()?.to_os_string();
+    name.push(".xmp");
+    let xmp = file.with_file_name(name);
+    if xmp.exists() {
+        return None;
+    }
+    let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let items: String = tags.iter().map(|t| format!("     <rdf:li>{}</rdf:li>\n", esc(t))).collect();
+    let body = format!(
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Insight\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  <rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n   <dc:subject>\n    <rdf:Bag>\n{items}    </rdf:Bag>\n   </dc:subject>\n  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n"
+    );
+    std::fs::write(&xmp, body).ok()?;
+    Some(xmp)
 }
 
 /// Run the plan. In `Move` mode an original is removed only after its copy in the
@@ -968,9 +995,13 @@ pub fn execute(ops: &[Op], mode: Mode, link_back: bool, src_root: &Path, dest: &
             return;
         }
         match place(op, mode, link_back) {
-            Ok(e) => {
+            Ok(mut e) => {
                 if !op.tags.is_empty() {
-                    let _ = set_tags(&op.dst, &op.tags, false);
+                    if cfg!(windows) {
+                        e.sidecar = write_xmp(&op.dst, &op.tags);
+                    } else {
+                        let _ = set_tags(&op.dst, &op.tags, false);
+                    }
                 }
                 entries.lock().push(e);
             }
@@ -1056,7 +1087,7 @@ fn place(op: &Op, mode: Mode, link_back: bool) -> Result<Entry> {
             anyhow::bail!("verification failed for {} — original kept", op.src.display());
         }
     }
-    let mut e = Entry { src: op.src.clone(), dst: op.dst.clone(), zip_name: None, hash: format!("{src_hash:032x}"), moved: false, linked: false, existed };
+    let mut e = Entry { src: op.src.clone(), dst: op.dst.clone(), zip_name: None, hash: format!("{src_hash:032x}"), moved: false, linked: false, existed, sidecar: None };
     if mode == Mode::Move {
         std::fs::remove_file(&op.src).with_context(|| format!("remove original {}", op.src.display()))?;
         e.moved = true;
@@ -1129,7 +1160,7 @@ fn zip_members(zpath: &Path, members: &[&Op], mode: Mode, progress: &Progress) -
     }
     let mut out = Vec::new();
     for (m, name, h) in planned {
-        let mut e = Entry { src: m.src.clone(), dst: zpath.to_path_buf(), zip_name: Some(name), hash: format!("{h:032x}"), moved: false, linked: false, existed };
+        let mut e = Entry { src: m.src.clone(), dst: zpath.to_path_buf(), zip_name: Some(name), hash: format!("{h:032x}"), moved: false, linked: false, existed, sidecar: None };
         if mode == Mode::Move {
             std::fs::remove_file(&m.src)?;
             e.moved = true;
@@ -1221,8 +1252,16 @@ pub fn undo(manifest: &Path) -> Result<usize> {
             continue;
         }
         let r: Result<()> = (|| {
-            if e.linked && std::fs::symlink_metadata(&e.src).is_ok_and(|m| m.file_type().is_symlink()) {
-                std::fs::remove_file(&e.src)?;
+            if let Some(x) = &e.sidecar {
+                let _ = std::fs::remove_file(x);
+            }
+            if e.linked {
+                // A symlink, or (Windows fallback) a hard link to the same content.
+                match std::fs::symlink_metadata(&e.src) {
+                    Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&e.src)?,
+                    Ok(m) if m.is_file() && format!("{:032x}", hash_file(&e.src)?) == e.hash => std::fs::remove_file(&e.src)?,
+                    _ => {}
+                }
             }
             if e.moved {
                 if let Some(d) = e.src.parent() {
@@ -1417,6 +1456,21 @@ mod tests {
         assert!(!dest.join("2024").exists());
         assert!(src.join("a.CR3").exists() && src.join("a.JPG").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn xmp_sidecar() {
+        let d = std::env::temp_dir().join(format!("insight-xmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("IMG_1.CR3");
+        std::fs::write(&f, b"x").unwrap();
+        let x = write_xmp(&f, &["Wedding".into(), "Client: Ana & Luis".into()]).unwrap();
+        assert_eq!(x, d.join("IMG_1.CR3.xmp"));
+        let body = std::fs::read_to_string(&x).unwrap();
+        assert!(body.contains("<rdf:li>Wedding</rdf:li>") && body.contains("Client: Ana &amp; Luis"));
+        assert!(write_xmp(&f, &["Other".into()]).is_none(), "existing sidecars are never overwritten");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

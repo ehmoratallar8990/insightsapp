@@ -309,7 +309,7 @@ impl InsightApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Tags for everything").color(MUTED));
                     ui.add(egui::TextEdit::singleline(&mut self.organize.opts.tags).desired_width(360.0).hint_text("e.g. Portfolio, Client: Ana"));
-                    ui.label(egui::RichText::new(if cfg!(target_os = "macos") { "→ Finder tags" } else if cfg!(windows) { "(not supported on Windows)" } else { "→ user.xdg.tags" }).size(11.5).color(FAINT));
+                    ui.label(egui::RichText::new(if cfg!(target_os = "macos") { "→ Finder tags" } else if cfg!(windows) { "→ XMP sidecars (Lightroom, Capture One)" } else { "→ user.xdg.tags" }).size(11.5).color(FAINT));
                 });
             });
             if replan && self.organize.scan.is_some() && (self.organize.opts.gap_hours - self.organize.planned_gap).abs() > 0.01 {

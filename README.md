@@ -210,7 +210,9 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
   RAW+JPEG twins move together. Adjust the sensitivity, then review the rejects with thumbnails and click to keep one.
 - **Formats:** pick RAW / JPEG / HEIC / other, keep them in separate folders or together, and optionally pack RAWs
   into one `RAW.zip` per camera and event.
-- **Tags:** for everything and per event, written as Finder tags on macOS (`user.xdg.tags` on Linux).
+- **Tags:** for everything and per event: Finder tags on macOS, `user.xdg.tags` on Linux, and on Windows XMP sidecars
+  (`IMG_0412.CR3.xmp`, `dc:subject` keywords) that Lightroom, Capture One, Bridge and darktable read. Existing
+  sidecars are never overwritten.
 - **Planned folders map:** a zoomable treemap (like the storage map) of exactly what will be created,
   `Organized › 2025 › 2025-09-12 Lisbon trip › Day 1 › Canon EOS R8 › RAW`. It updates live as you rename,
   merge or toggle options.
@@ -220,7 +222,7 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
   On the same drive, copies are APFS clones, so a move needs **no extra space**. To another drive, each
   original is freed as soon as its copy verifies.
 - **Links back** (off by default): after a move, a symlink at each original path points to the file's new home,
-  so other apps' old paths keep working.
+  so other apps' old paths keep working. On Windows without Developer Mode a hard link is used instead (no extra space either).
 - **Copy mode:** the same verified copy, keeping the originals.
 - **Safe by construction:** existing files are never overwritten, re-running skips what's already there, and
   every run writes a manifest. **Undo** moves each file back to its exact original path (re-verified),
