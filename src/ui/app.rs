@@ -235,7 +235,7 @@ impl InsightApp {
             media_grid: Vec::new(),
             media_grid_title: String::new(),
             media_grid_at: 0.0,
-            media_browse: false,
+            media_browse: true,
             media_browse_at: 0.0,
             media_map: Default::default(),
             organize: super::organize_view::OrganizeUi::new(),

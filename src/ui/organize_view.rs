@@ -47,7 +47,7 @@ impl OrganizeUi {
             src: pics.to_string_lossy().into_owned(),
             dest: pics.join("Organized").to_string_lossy().into_owned(),
             opts: Options::default(),
-            browse: false,
+            browse: true,
             map: FolderMap::default(),
             progress: Arc::new(Progress::default()),
             scan_job: Job::default(),
@@ -98,6 +98,7 @@ impl InsightApp {
         o.scanned = (o.src.clone(), o.dest.clone());
         let quality = o.opts.rejects;
         o.scan_job.start(ctx, move || organize::scan(&src, Some(&dest), &prog, quality));
+        o.browse = false; // the planned-folders map takes over once there's a preview
     }
 
     fn organize_replan(&mut self) {
@@ -196,7 +197,7 @@ impl InsightApp {
                     ui.label(egui::RichText::new("Photos from").color(MUTED));
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.organize.src).desired_width(460.0).hint_text("A messy folder, a card dump, ~/Pictures…"));
-                        if theme::chip(ui, "📁 Browse", self.organize.browse, pal.accent2, Id::unique("org-browse")).clicked() {
+                        if theme::chip(ui, "📁 Folder map", self.organize.browse, pal.accent2, Id::unique("org-browse")).clicked() {
                             self.organize.browse = !self.organize.browse;
                         }
                     });
@@ -209,7 +210,8 @@ impl InsightApp {
                     ui.add_space(8.0);
                     let eng = self.engine.clone();
                     if self.organize.map.show(ui, &eng, pal, "org-map", &mut self.organize.src, 260.0) {
-                        self.organize.browse = false;
+                        let ctx = ui.ctx().clone();
+                        self.organize_analyze(&ctx);
                     }
                 }
                 ui.add_space(10.0);

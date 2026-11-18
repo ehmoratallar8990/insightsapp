@@ -231,7 +231,7 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 
 **Media**
 - **Photo folder map:** a zoomable treemap of the folders that hold your photos, weighted by size and showing
-  photo counts, with breadcrumbs. Pick a folder to analyze with one click.
+  photo counts, with breadcrumbs, shown right under "Photos in". Pick a folder to analyze with one click; the same map is the Organize source picker.
 - Counts and sizes of images, videos and audio.
 - **Labels:** 94 zero-shot categories (people, pets, places, food, documents, receipts, screenshots, UI
   designs, memes…), shown as a clickable cloud and searchable with `label:`.

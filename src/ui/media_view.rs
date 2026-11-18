@@ -157,7 +157,7 @@ impl InsightApp {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Photos in").color(MUTED));
                         ui.add(egui::TextEdit::singleline(&mut self.settings.media_scope).desired_width(300.0));
-                        if theme::chip(ui, "📁 Browse folders", self.media_browse, pal.accent2, Id::unique("media-browse")).clicked() {
+                        if theme::chip(ui, "📁 Folder map", self.media_browse, pal.accent2, Id::unique("media-browse")).clicked() {
                             self.media_browse = !self.media_browse;
                             self.media_browse_at = ui.input(|i| i.time);
                         }
@@ -173,7 +173,6 @@ impl InsightApp {
                         ui.add_space(8.0);
                         let eng = self.engine.clone();
                         if self.media_map.show(ui, &eng, pal, "media-map", &mut self.settings.media_scope, 300.0) {
-                            self.media_browse = false;
                             self.toast(ui, "Folder selected — press Analyze photos");
                         }
                         ui.add_space(6.0);
