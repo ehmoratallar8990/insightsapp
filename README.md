@@ -52,6 +52,11 @@ does one job quickly.
   project-folder purge.
 - **Always current:** checks GitHub releases, downloads updates in the background, verifies them with SHA-256 and
   installs them when you quit.
+- **People & pets:** finds faces on device, you name them once with a relationship (Jose · Dad, Cinthia ·
+  Spouse) and they're recognised everywhere; pets are learned from a few example photos. Search with
+  `person:jose`, `who:dad`, `with:mushu`.
+- **Places:** a Google-Photos-style map of where your photos were taken, offline world map plus optional
+  street-level OpenStreetMap detail; `country:guatemala` in search.
 - **Photo organizer for messy photographers:** point it at a card dump or a chaotic Pictures folder and it
   sorts camera photos into `2025 / 2025-07-14 Wedding / Canon EOS R8 / RAW`, moves blurry shots to `Rejects`,
   and shows an editable preview first. Files are moved only after each copy is verified by content hash, and
@@ -80,6 +85,8 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 | Find project build folders (`node_modules`, `target`…) | walk the disk | **17 ms** (answered from the index) | |
 | List installed apps with sizes | — | **1.2 s** (66 apps) | |
 | Health panel refresh | — | **1×/s**, sampler idle when the page is hidden | |
+| Faces: detect + recognise (YuNet + SFace, pure-Rust ONNX) | — | **~37 photos/s** (256 photos, 161 faces in 6.9 s) | first run downloads 37 MB |
+| Places: read GPS (2,757 HEIC files) | — | **5 s** · country lookup offline | headers only |
 | Organize: read camera data (2,058 photos, JPEG + CR3) | — | **0.6 s** | headers only |
 | Organize: focus / exposure check | — | **≈160 photos/s** (12.6 s for 2,058) | optional |
 | Photo understanding (CLIP ViT-B/32) | — | **91 img/s** on the Apple GPU, 42 img/s on CPU | |
@@ -113,7 +120,7 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 - Filter chips: Folders, Images, Videos, Audio, Documents, Archives, Code, Apps.
 - Matches highlighted in the results, plus a detail panel with a preview, size, dates, full path and AI labels.
 - Keyboard first: type anywhere to search, ↑/↓ to move, **Enter** to open, **⌘/Ctrl+Enter** to reveal in
-  Finder/Explorer, **⌘/Ctrl+C** to copy the path, **Esc** to clear. **⌘1–7** switch tabs.
+  Finder/Explorer, **⌘/Ctrl+C** to copy the path, **Esc** to clear. **⌘1–9** switch tabs.
 - Right-click a result to open, reveal, copy the path or name, or move it to the Trash.
 
 - **Group by app:** the Apps filter shows results as a tree under the app or package that owns them
@@ -145,6 +152,8 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 | `hidden:no` | skip dot-files |
 | `affphoto`, `photshop` | fuzzy: letters in order or one typo — kicks in when exact hits are few (toggle **≈ Fuzzy**) |
 | `fuzzy:no` | exact matches only |
+| `person:jose`, `who:dad`, `with:mushu` | photos of a named person / pet (name or relationship) |
+| `country:guatemala`, `place:italy` | photos taken in a country (GPS) |
 
 **Storage**
 - Disk usage rings and *space by type* (click a type to list its biggest files).
@@ -188,6 +197,30 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 - A sidebar banner offers **Restart & update**; otherwise the update is swapped in when you quit. The swap is an
   atomic rename, so a failed update leaves the current version untouched. Both behaviours can be turned off in
   Settings → Updates.
+
+**People & pets** (on device, free)
+- **Faces:** OpenCV Zoo's YuNet detector (MIT) finds faces and 5 landmarks; each face is aligned to the standard
+  112×112 template and SFace (Apache-2.0) turns it into a 128-number fingerprint. Both ONNX models run in pure
+  Rust via [tract](https://github.com/sonos/tract), downloaded once (37 MB) and verified by SHA-256. On a real
+  library, the same person scored 0.60–0.98 similarity across photos and different people scored ~0.0
+  (threshold 0.36).
+- **Name groups, not faces:** unnamed faces are grouped by person; type a name and a relationship (Me, Spouse,
+  Dad, Mom, Son, Daughter, Friend, Pet… or your own) and every matching face — now and in future scans — is
+  named. Remove wrong faces with one click; corrections stick.
+- **Pets** (and any recurring subject): faces don't work for animals, so you mark 3–10 photos of e.g. Mushu and
+  Insight finds look-alikes with the on-device CLIP embeddings; confirm or reject suggestions (✔ / ✖) and tune the
+  strictness.
+- **Search:** `person:jose`, `who:dad` (relationship), `with:mushu`, combinable with everything else
+  (`with:mushu dm:year ext:cr3`).
+- **Organize uses the names:** `IMG_5972.JPG` → `IMG_5972_dog_mushu.JPG`; event folders prefer who's in them.
+
+**Places**
+- GPS is read from photo headers (JPEG, HEIC, PNG/TIFF, DNG/CR2/NEF/ARW, Canon CR3 — 2,757 HEICs in 5 s) and
+  cached; countries are resolved offline from bundled Natural Earth shapes (public domain).
+- The map works offline (world map with borders). **Street detail** fetches OpenStreetMap tiles only while you're
+  zoomed in, re-coloured for the dark theme and cached on disk — only anonymous tile requests leave the computer,
+  never your photo locations. Photos cluster into thumbnail bubbles with counts; click one to see its photos,
+  double-click to zoom in, or jump to a country. `country:italy` / `place:fra` work in search.
 
 **Organize** (photos, fully on device, free)
 - **Only real camera photos:** a file is organized when its EXIF has a camera make/model and a capture time

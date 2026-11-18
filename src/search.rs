@@ -17,6 +17,8 @@
 //!   re:^IMG_\d+      regular expression on the name
 //!   hidden:yes|no    dot-files
 //!   fuzzy:no         disable fuzzy fallback for this query
+//!   person:jose  who:dad  with:mushu   photos of a named person / pet (name or relationship)
+//!   country:guatemala  place:italy      photos taken in a country (from GPS)
 //!
 //! Fuzzy: when plain name terms find fewer than `FUZZY_MIN` exact hits, the search
 //! is re-run accepting names that contain the term's letters *in order* (fzf-style:
@@ -247,6 +249,7 @@ impl Query {
                     k.to_ascii_lowercase().as_str(),
                     "ext" | "type" | "kind" | "size" | "dm" | "modified" | "path" | "in" | "re"
                         | "regex" | "label" | "tag" | "hidden" | "file" | "folder" | "dir" | "fuzzy"
+                        | "person" | "who" | "with" | "country" | "place"
                 )
             }) {
                 match k.to_ascii_lowercase().as_str() {
@@ -276,6 +279,14 @@ impl Query {
                     },
                     "label" | "tag" => {
                         let l = v.to_ascii_lowercase();
+                        if !neg {
+                            out.labels.push(l.clone());
+                        }
+                        Pred::Label(l)
+                    }
+                    "person" | "who" | "with" | "country" | "place" => {
+                        let tag = if matches!(k.to_ascii_lowercase().as_str(), "country" | "place") { '#' } else { '@' };
+                        let l = format!("{tag}{}", v.to_ascii_lowercase());
                         if !neg {
                             out.labels.push(l.clone());
                         }

@@ -123,9 +123,20 @@ impl InsightApp {
                 p.label = store.labels_for(&p.path.to_string_lossy()).first().filter(|(_, pr)| *pr >= 0.25).map(|(l, _)| l.to_string());
             }
         }
+        {
+            // Named people & pets from the People tab → `_mushu` suffixes, event names.
+            let people = crate::faces::shared().read();
+            let media = self.media.store.read();
+            if !people.subjects.is_empty() {
+                for p in scan.photos.iter_mut() {
+                    p.names = people.names_in(&p.path.to_string_lossy(), &media);
+                }
+            }
+        }
         organize::share_labels(&mut scan);
         organize::mark_rejects(&mut scan, self.organize.opts.reject_sensitivity);
-        let by_path: std::collections::HashMap<PathBuf, String> = scan.photos.iter().filter_map(|p| Some((p.path.clone(), p.label.clone()?))).collect();
+        // Event-name suggestions prefer who's in the photos ("Mushu") over generic labels ("Dog").
+        let by_path: std::collections::HashMap<PathBuf, String> = scan.photos.iter().filter_map(|p| Some((p.path.clone(), p.names.first().cloned().or_else(|| p.label.clone())?))).collect();
         let labels = move |p: &Path| by_path.get(p).cloned();
         let src = PathBuf::from(self.organize.scanned.0.trim());
         self.organize.events = organize::plan(&scan, &self.organize.opts, &src, &labels);
@@ -139,7 +150,7 @@ impl InsightApp {
         let pal = self.pal;
         let now = ui.input(|i| i.time);
         // Folder dialog results.
-        match self.picker.poll() {
+        match if matches!(self.picker.target, 1..=3) { self.picker.poll() } else { None } {
             Some((1, p)) => {
                 self.organize.src = p;
                 let ctx = ui.ctx().clone();

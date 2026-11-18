@@ -21,18 +21,22 @@ pub enum Page {
     Storage,
     Cleanup,
     Media,
+    People,
+    Places,
     Organize,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [Page::Search, Page::Health, Page::Storage, Page::Cleanup, Page::Media, Page::Organize, Page::Settings];
+    pub const ALL: [Page; 9] = [Page::Search, Page::Health, Page::Storage, Page::Cleanup, Page::Media, Page::People, Page::Places, Page::Organize, Page::Settings];
     fn label(self) -> &'static str {
         match self {
             Page::Search => "Search",
             Page::Health => "Health",
             Page::Cleanup => "Cleanup",
             Page::Organize => "Organize",
+            Page::People => "People",
+            Page::Places => "Places",
             Page::Storage => "Storage",
             Page::Media => "Media",
             Page::Settings => "Settings",
@@ -44,6 +48,8 @@ impl Page {
             Page::Health => "💓",
             Page::Cleanup => "✨",
             Page::Organize => "📂",
+            Page::People => "👥",
+            Page::Places => "📍",
             Page::Storage => "📊",
             Page::Media => "🖼",
             Page::Settings => "⚙",
@@ -146,6 +152,8 @@ pub struct InsightApp {
     pub organize: super::organize_view::OrganizeUi,
     /// Native folder dialog shared by Media / Organize.
     pub picker: super::picker::FolderPicker,
+    pub people: super::people_view::PeopleUi,
+    pub places: super::places_view::PlacesUi,
 
     // Settings edit buffers
     pub new_root: String,
@@ -180,6 +188,7 @@ impl InsightApp {
             settings.media_scope = settings.roots[0].clone();
             settings.dup_scope = settings.roots[0].clone();
         }
+        let scope0 = settings.media_scope.clone();
         let pal = Palette::from_index(settings.accent);
         theme::install_fonts(&cc.egui_ctx);
         theme::apply_style(&cc.egui_ctx, pal);
@@ -242,6 +251,8 @@ impl InsightApp {
             media_map: Default::default(),
             organize: super::organize_view::OrganizeUi::new(),
             picker: Default::default(),
+            people: super::people_view::PeopleUi::new(scope0.clone()),
+            places: super::places_view::PlacesUi::new(dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or(scope0)),
             new_root: String::new(),
             new_exclude: String::new(),
             confirm_trash: None,
@@ -520,7 +531,7 @@ impl InsightApp {
     fn global_shortcuts(&mut self, ui: &mut Ui) {
         let (cmd, keys) = ui.input(|i| {
             let mut k = Vec::new();
-            for (n, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6, egui::Key::Num7].iter().enumerate() {
+            for (n, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8, egui::Key::Num9].iter().enumerate() {
                 if i.key_pressed(*key) {
                     k.push(n);
                 }
@@ -767,6 +778,8 @@ impl eframe::App for InsightApp {
                 Page::Storage => self.storage_page(&mut child),
                 Page::Media => self.media_page(&mut child),
                 Page::Organize => self.organize_page(&mut child),
+                Page::People => self.people_page(&mut child),
+                Page::Places => self.places_page(&mut child),
                 Page::Settings => self.settings_page(&mut child),
             }
         });
@@ -792,6 +805,8 @@ impl InsightApp {
                     "health" => Page::Health,
                     "cleanup" => Page::Cleanup,
                     "organize" => Page::Organize,
+                    "people" => Page::People,
+                    "places" => Page::Places,
                     "media" => Page::Media,
                     "settings" => Page::Settings,
                     _ => Page::Search,

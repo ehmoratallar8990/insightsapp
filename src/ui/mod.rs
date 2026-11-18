@@ -3,6 +3,8 @@ pub mod cleanup_view;
 pub mod folder_map;
 mod health_view;
 mod media_view;
+pub mod people_view;
+pub mod places_view;
 pub mod organize_view;
 pub mod picker;
 mod search_view;

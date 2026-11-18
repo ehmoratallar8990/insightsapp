@@ -154,6 +154,15 @@ impl LabelSource for MediaStore {
 pub struct SharedLabels(pub Arc<RwLock<MediaStore>>);
 impl LabelSource for SharedLabels {
     fn paths_with_label(&self, label: &str) -> HashSet<String> {
+        if let Some(who) = label.strip_prefix('@') {
+            // person:/who:/with: → named people & pets (by name or relationship).
+            let people = crate::faces::shared().read();
+            let media = self.0.read();
+            return people.find(who).into_iter().flat_map(|id| people.photos_of(id, &media)).map(|p| p.to_lowercase()).collect();
+        }
+        if let Some(c) = label.strip_prefix('#') {
+            return crate::places::shared().read().in_country(c).into_iter().map(|p| p.to_lowercase()).collect();
+        }
         self.0.read().paths_with_label(label)
     }
 }
@@ -466,6 +475,11 @@ pub fn classify_cli(paths: &[String]) -> anyhow::Result<()> {
 
 /// Image files worth analysing below `scope` (skips caches, app bundles, icons).
 pub fn candidates(idx: &Index, scope: &str) -> Vec<(String, u64, u32)> {
+    candidates_with(idx, scope, crate::filetype::is_decodable_image)
+}
+
+/// Like `candidates`, with a custom file-name filter (lower-case name).
+pub fn candidates_with(idx: &Index, scope: &str, accept: fn(&str) -> bool) -> Vec<(String, u64, u32)> {
     let scope_l = scope.to_lowercase();
     let skip = ["/library/", "/.", "node_modules", ".app/", "/appdata/", "\\appdata\\", "/cache", "/caches/", "/thumbnails"];
     (0..idx.len() as u32)
@@ -476,7 +490,7 @@ pub fn candidates(idx: &Index, scope: &str) -> Vec<(String, u64, u32)> {
                 return None;
             }
             let lname = std::str::from_utf8(idx.lower_name(id)).ok()?;
-            if !crate::filetype::is_decodable_image(lname) {
+            if !accept(lname) {
                 return None;
             }
             let p = idx.path_string(id);

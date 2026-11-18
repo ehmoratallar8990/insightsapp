@@ -389,6 +389,8 @@ impl InsightApp {
                 ("size:>100mb   size:1mb..1gb", "by size"),
                 ("dm:today   dm:week   dm:>2024-01", "modified date"),
                 ("label:dog   label:screenshot", "AI media labels (Media tab)"),
+                ("person:jose   who:dad   with:mushu", "people & pets you named (People tab)"),
+                ("country:guatemala   place:italy", "where photos were taken (Places tab)"),
                 ("re:^IMG_\\d+", "regular expression"),
                 ("hidden:no", "skip dot-files"),
                 ("affphoto   photshop", "fuzzy: letters in order / one typo, when exact hits are few"),

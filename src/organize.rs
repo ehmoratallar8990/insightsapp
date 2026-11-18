@@ -90,6 +90,8 @@ pub struct Photo {
     pub reject: bool,
     /// Short content label (from the on-device model) for the file-name suffix.
     pub label: Option<String>,
+    /// Named people / pets in the photo (People tab), for the suffix: `_dog_mushu`.
+    pub names: Vec<String>,
 }
 
 /// Cheap on-device image quality: is it sharp anywhere, is it exposed at all?
@@ -397,6 +399,11 @@ pub fn read_meta(path: &Path) -> Option<Meta> {
                 }
             }
         }
+        "heic" | "heif" | "hif" | "avif" => {
+            if let Some(e) = heif_exif(path).and_then(|t| reader.read_raw(t).ok()) {
+                meta_from(&e, &mut m);
+            }
+        }
         _ => {
             let mut br = BufReader::new(f);
             if let Ok(e) = reader.read_from_container(&mut br) {
@@ -424,6 +431,113 @@ fn video_created(f: &mut std::fs::File) -> Option<NaiveDateTime> {
         Some(local.naive_local()).filter(|d| d.year() > 2000)
     };
     look(0).or_else(|| look(len.saturating_sub(4 << 20)))
+}
+
+/// The raw TIFF/EXIF block of a HEIC/HEIF/AVIF file, found by walking the ISO-BMFF
+/// boxes (meta → iinf/iloc → the "Exif" item). Bounds-checked and loop-free: the EXIF
+/// crate's own HEIF parser hangs on some valid Apple files, so it's never used.
+pub fn heif_exif(path: &Path) -> Option<Vec<u8>> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut head = Vec::new();
+    f.by_ref().take(1 << 20).read_to_end(&mut head).ok()?;
+    let be = |b: &[u8], n: usize| -> Option<u64> { (b.len() >= n).then(|| b[..n].iter().fold(0u64, |a, &x| (a << 8) | x as u64)) };
+    // Iterate boxes in buf[from..to]: (type, payload_start, end).
+    let boxes = |buf: &[u8], from: usize, to: usize| -> Vec<([u8; 4], usize, usize)> {
+        let mut out = Vec::new();
+        let mut p = from;
+        while p + 8 <= to.min(buf.len()) && out.len() < 4096 {
+            let size = be(&buf[p..], 4).unwrap_or(0) as usize;
+            let ty = [buf[p + 4], buf[p + 5], buf[p + 6], buf[p + 7]];
+            let (hdr, size) = match size {
+                1 => (16, buf.get(p + 8..).and_then(|x| be(x, 8)).unwrap_or(0) as usize),
+                0 => (8, to - p),
+                s => (8, s),
+            };
+            if size < hdr || p + size > to {
+                break;
+            }
+            out.push((ty, p + hdr, p + size));
+            p += size;
+        }
+        out
+    };
+    let top = boxes(&head, 0, head.len());
+    let (_, ms, me) = *top.iter().find(|b| &b.0 == b"meta")?;
+    let meta = boxes(&head, ms + 4, me); // FullBox: skip version/flags
+    // iinf: find the item id whose type is "Exif".
+    let (_, is, ie) = *meta.iter().find(|b| &b.0 == b"iinf")?;
+    let ver = *head.get(is)?;
+    let first = is + 4 + if ver == 0 { 2 } else { 4 };
+    let mut exif_id = None;
+    for (ty, ps, _) in boxes(&head, first, ie) {
+        if &ty != b"infe" {
+            continue;
+        }
+        let v = *head.get(ps)?;
+        let (id, rest) = match v {
+            2 => (be(head.get(ps + 4..)?, 2)?, ps + 6),
+            3 => (be(head.get(ps + 4..)?, 4)?, ps + 8),
+            _ => continue,
+        };
+        if head.get(rest + 2..rest + 6)? == b"Exif" {
+            exif_id = Some(id);
+            break;
+        }
+    }
+    let exif_id = exif_id?;
+    // iloc: where that item's bytes live.
+    let (_, ls, le) = *meta.iter().find(|b| &b.0 == b"iloc")?;
+    let b = head.get(ls..le)?;
+    let v = b[0];
+    let off_sz = (b.get(4)? >> 4) as usize;
+    let len_sz = (b.get(4)? & 15) as usize;
+    let base_sz = (b.get(5)? >> 4) as usize;
+    let idx_sz = if v == 1 || v == 2 { (b.get(5)? & 15) as usize } else { 0 };
+    let mut p = 6;
+    let count = if v < 2 {
+        p += 2;
+        be(b.get(4 + 2..)?, 2)?
+    } else {
+        p += 4;
+        be(b.get(4 + 2..)?, 4)?
+    };
+    for _ in 0..count.min(10_000) {
+        let id_sz = if v < 2 { 2 } else { 4 };
+        let id = be(b.get(p..)?, id_sz)?;
+        p += id_sz;
+        if v == 1 || v == 2 {
+            p += 2; // construction method
+        }
+        p += 2; // data reference index
+        let base = be(b.get(p..)?, base_sz).unwrap_or(0);
+        p += base_sz;
+        let extents = be(b.get(p..)?, 2)?;
+        p += 2;
+        let mut first_extent = None;
+        for _ in 0..extents.min(64) {
+            p += idx_sz;
+            let off = be(b.get(p..)?, off_sz).unwrap_or(0);
+            p += off_sz;
+            let l = be(b.get(p..)?, len_sz).unwrap_or(0);
+            p += len_sz;
+            first_extent.get_or_insert((off, l));
+        }
+        if id == exif_id {
+            let (off, l) = first_extent?;
+            let start = base + off;
+            if l == 0 || l > 16 << 20 || start + l > len {
+                return None;
+            }
+            f.seek(std::io::SeekFrom::Start(start)).ok()?;
+            let mut data = vec![0u8; l as usize];
+            f.read_exact(&mut data).ok()?;
+            // Payload: 4-byte offset to the TIFF header, then (usually) "Exif\0\0".
+            let skip = 4 + be(&data, 4)? as usize;
+            return data.get(skip..).map(|t| t.to_vec());
+        }
+    }
+    None
 }
 
 /// Human camera name: "Canon EOS R8", "iPhone 15 Pro", "Nikon Z 6", "Sony ILCE-7M4".
@@ -544,6 +658,7 @@ pub fn scan(src: &Path, dest: Option<&Path>, progress: &Progress, quality: bool)
                 quality: None,
                 reject: false,
                 label: None,
+                names: Vec::new(),
             }),
             (true, None) if video => s.others.push((path, size)),
             _ => s.others.push((path, size)),
@@ -802,13 +917,18 @@ pub fn camera_folder(opts: &Options, camera: &str) -> String {
     sanitize(opts.camera_names.get(camera).map(String::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(camera))
 }
 
-/// Original name plus `_suffix` (content label, else the event name).
+/// Original name plus `_suffix`: the content label (else the event name), then any
+/// named people / pets — `IMG_5610_dog_mushu.JPG`, `IMG_0412_group_jose-cinthia.HEIC`.
 pub fn file_name(p: &Photo, suffix: bool, event_slug: &str) -> String {
     let orig = p.path.file_name().unwrap_or_default().to_string_lossy().to_string();
     if !suffix {
         return orig;
     }
-    let tag = p.label.as_deref().map(slug).filter(|s| !s.is_empty()).unwrap_or_else(|| event_slug.to_string());
+    let mut tag = p.label.as_deref().map(slug).filter(|s| !s.is_empty()).unwrap_or_else(|| event_slug.to_string());
+    let names: Vec<String> = p.names.iter().map(|n| slug(n)).filter(|n| !n.is_empty() && *n != tag).take(3).collect();
+    if !names.is_empty() {
+        tag = if tag.is_empty() { names.join("-") } else { format!("{tag}_{}", names.join("-")) };
+    }
     if tag.is_empty() {
         return orig;
     }
@@ -830,9 +950,20 @@ pub fn share_labels(scan: &mut Scan) {
             by_key.entry(twin_key(&p.path)).or_insert_with(|| l.clone());
         }
     }
+    let mut names: HashMap<(PathBuf, String), Vec<String>> = HashMap::new();
+    for p in &scan.photos {
+        if !p.names.is_empty() {
+            names.entry(twin_key(&p.path)).or_insert_with(|| p.names.clone());
+        }
+    }
     for p in scan.photos.iter_mut() {
         if p.label.is_none() {
             p.label = by_key.get(&twin_key(&p.path)).cloned();
+        }
+        if p.names.is_empty() {
+            if let Some(n) = names.get(&twin_key(&p.path)) {
+                p.names = n.clone();
+            }
         }
     }
 }
@@ -1455,6 +1586,23 @@ mod tests {
         assert_eq!(camera_name("SONY", "ILCE-7M4"), "Sony ILCE-7M4");
         assert_eq!(camera_name("FUJIFILM", "X-T5"), "Fujifilm X-T5");
         assert_eq!(camera_name("Canon", "Canon EOS M50m2"), "Canon EOS M50 Mark II");
+        let mut ph = Photo {
+            path: PathBuf::from("/c/IMG_5610.JPG"),
+            size: 1,
+            taken: NaiveDateTime::parse_from_str("2025-07-25 18:44", "%Y-%m-%d %H:%M").unwrap(),
+            camera: "Canon EOS M50 Mark II".into(),
+            format: Format::Jpeg,
+            quality: None,
+            reject: false,
+            label: Some("dog".into()),
+            names: vec!["Mushu".into()],
+        };
+        assert_eq!(file_name(&ph, true, "walk"), "IMG_5610_dog_mushu.JPG");
+        ph.label = Some("group".into());
+        ph.names = vec!["Jose".into(), "Cinthia".into()];
+        assert_eq!(file_name(&ph, true, "walk"), "IMG_5610_group_jose-cinthia.JPG");
+        ph.label = None;
+        assert_eq!(file_name(&ph, true, ""), "IMG_5610_jose-cinthia.JPG");
         assert_eq!(sanitize("a/b: c?"), "a-b- c-");
         assert!(generic_folder("100CANON"));
         assert!(generic_folder("DCIM"));
@@ -1469,7 +1617,7 @@ mod tests {
     #[test]
     fn events_and_ops() {
         let src = Path::new("/src");
-        let ph = |p: &str, t: &str, cam: &str, f: Format| Photo { path: PathBuf::from(p), size: 10, taken: dt(t), camera: cam.into(), format: f, quality: None, reject: false, label: None };
+        let ph = |p: &str, t: &str, cam: &str, f: Format| Photo { path: PathBuf::from(p), size: 10, taken: dt(t), camera: cam.into(), format: f, quality: None, reject: false, label: None, names: Vec::new() };
         let scan = Scan {
             photos: vec![
                 ph("/src/Wedding/IMG_1.CR3", "2024-07-14 15:00", "Canon EOS R8", Format::Raw),

@@ -5,11 +5,13 @@
 
 mod cleanup;
 mod engine;
+mod faces;
 mod filetype;
 mod health;
 mod index;
 mod media;
 mod organize;
+mod places;
 mod search;
 mod storage;
 mod ui;
@@ -27,7 +29,7 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
-    if let Some(cmd) = args.get(1).filter(|a| ["--cleanup", "--optimize", "--apps", "--update-check", "--update-now", "--health", "--organize-preview", "--organize-run", "--organize-undo"].contains(&a.as_str())) {
+    if let Some(cmd) = args.get(1).filter(|a| ["--cleanup", "--optimize", "--apps", "--update-check", "--update-now", "--health", "--organize-preview", "--organize-run", "--organize-undo", "--faces", "--gps", "--people-scan"].contains(&a.as_str())) {
         tools_cli(cmd, &args[2..]);
         return Ok(());
     }
@@ -87,9 +89,9 @@ fn cli(args: &[String]) {
         return;
     }
     let q = search::Query::parse(&args.join(" "), None);
-    let store = media::MediaStore::load();
+    let store = media::SharedLabels(std::sync::Arc::new(parking_lot::RwLock::new(media::MediaStore::load())));
     let out = search::run(&idx, &q, search::SortKey::Relevance, false, &store);
-    for &id in out.ids.iter().take(30) {
+    for &id in out.ids.iter().take(std::env::var("INSIGHT_CLI_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(30)) {
         println!("{}", idx.path_string(id));
     }
     eprintln!("{} results in {:.2} ms", out.ids.len(), out.elapsed_us as f64 / 1000.0);
@@ -187,6 +189,17 @@ fn tools_cli(cmd: &str, _args: &[String]) {
             let p = organize::Progress::default();
             let mut scan = organize::scan(&src, Some(&dest), &p, true);
             organize::mark_rejects(&mut scan, 0.35);
+            {
+                // Content labels + named people/pets, as the Organize page does.
+                let media = media::MediaStore::load();
+                let people = faces::shared().read();
+                for ph in scan.photos.iter_mut() {
+                    let path = ph.path.to_string_lossy().to_string();
+                    ph.label = media.labels_for(&path).first().filter(|(_, pr)| *pr >= 0.25).map(|(l, _)| l.to_string());
+                    ph.names = people.names_in(&path, &media);
+                }
+                organize::share_labels(&mut scan);
+            }
             let mut opts = organize::Options::default();
             opts.zip_raw = _args.iter().any(|a| a == "--zip");
             let events = organize::plan(&scan, &opts, &src, &|_| None);
@@ -209,6 +222,53 @@ fn tools_cli(cmd: &str, _args: &[String]) {
             Some(m) => println!("{:?}", organize::undo(&m).map_err(|e| e.to_string())),
             None => println!("nothing to undo"),
         },
+        "--faces" => {
+            // insight --faces a.jpg b.jpg …: detect faces, print boxes and cross-photo similarity.
+            let m = match faces::Models::load() {
+                Ok(m) => m,
+                Err(e) => return println!("models: {e:#}"),
+            };
+            let mut all: Vec<(String, [f32; 128])> = Vec::new();
+            for p in _args {
+                let t = Instant::now();
+                let Some(img) = faces::load_rgb(std::path::Path::new(p)) else { println!("{p}: can't decode"); continue };
+                let dets = m.detect(&img, 0.86).unwrap_or_default();
+                println!("{} ({}x{}): {} face(s) in {:?}", std::path::Path::new(p).file_name().unwrap_or_default().to_string_lossy(), img.width(), img.height(), dets.len(), t.elapsed());
+                for (k, d) in dets.iter().enumerate() {
+                    println!("   #{k} score {:.2} box {:?}", d.score, d.bbox.map(|v| v.round()));
+                    if let Ok(e) = m.embed(&img, d) {
+                        all.push((format!("{}#{k}", std::path::Path::new(p).file_stem().unwrap_or_default().to_string_lossy()), e));
+                    }
+                }
+            }
+            for i in 0..all.len() {
+                for j in i + 1..all.len() {
+                    let c = faces::cosine(&all[i].1, &all[j].1);
+                    println!("{:>24} ~ {:<24} {:.3}{}", all[i].0, all[j].0, c, if c >= faces::SAME_PERSON { "  SAME" } else { "" });
+                }
+            }
+        }
+        "--gps" => {
+            for p in _args {
+                let g = places::read_gps(std::path::Path::new(p));
+                println!("{p}: {:?} {:?}", g, g.and_then(|(a, o)| places::country_of(a, o)));
+            }
+        }
+        "--people-scan" => {
+            // insight --people-scan <folder>: find faces (cached), print groups.
+            let scope = _args.first().cloned().unwrap_or_default();
+            let idx = index::Index::load(&index::index_file()).unwrap_or_else(|_| index::Index::empty(vec![]));
+            let items = media::candidates_with(&idx, &scope, |n| filetype::is_decodable_image(n) || n.ends_with(".cr3"));
+            let m = match faces::Models::load() {
+                Ok(m) => m,
+                Err(e) => return println!("models: {e:#}"),
+            };
+            let p = faces::Progress::default();
+            let n = faces::scan(&m, items.clone(), faces::shared(), &p).unwrap_or(0);
+            let s = faces::shared().read();
+            let cl = s.clusters();
+            println!("{} photos scanned in {:?} · {} new faces · {} faces total · {} groups (sizes: {:?})", items.len(), t.elapsed(), n, s.faces.len(), cl.len(), cl.iter().map(|c| c.len()).take(12).collect::<Vec<_>>());
+        }
         "--health" => {
             let ctx = egui::Context::default();
             let m = health::Monitor::start(ctx);
