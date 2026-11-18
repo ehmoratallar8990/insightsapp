@@ -724,7 +724,7 @@ impl InsightApp {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(m) = r.manifest.clone() {
-                            if theme::ghost_button(ui, "↶ Undo").on_hover_text("Put every file back where it was (verified), remove links and copies this run made").clicked() {
+                            if theme::ghost_button(ui, "↩ Undo").on_hover_text("Put every file back where it was (verified), remove links and copies this run made").clicked() {
                                 self.organize.undo_job.start(ui.ctx(), move || organize::undo(&m).map_err(|e| e.to_string()));
                             }
                         }
@@ -761,7 +761,7 @@ impl InsightApp {
                         self.organize.confirm = true;
                     }
                     if let Some(m) = organize::last_manifest(Path::new(self.organize.dest.trim())) {
-                        if theme::ghost_button(ui, "↶ Undo last run").clicked() {
+                        if theme::ghost_button(ui, "↩ Undo last run").clicked() {
                             self.organize.undo_job.start(ui.ctx(), move || organize::undo(&m).map_err(|e| e.to_string()));
                         }
                     }
