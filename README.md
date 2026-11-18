@@ -226,9 +226,11 @@ cargo test --release                   # unit tests (walker, index, query engine
 - Optional features: `cuda` (NVIDIA GPU for the media model). `--no-default-features` drops the built-in
   model download (place the files in the data folder yourself).
 
-**Releases:** `./scripts/release.sh 0.2.0` bumps the version, packages the macOS app, tags, pushes and publishes
-the GitHub release. The [Release workflow](.github/workflows/release.yml) then builds and attaches the Windows and
-Linux binaries. CI runs the tests on macOS, Windows and Linux for every push.
+**Releases are automatic.** Every push to `main` whose `Cargo.toml` version has no `v<version>` tag yet
+triggers the [Release workflow](.github/workflows/release.yml): it tests and builds on macOS (universal app),
+Windows and Linux, tags the commit and publishes a GitHub release with all three downloads. To ship, bump the
+version and push, or run `./scripts/release.sh 0.2.0`, which does exactly that. CI runs the tests on all three
+platforms for every push.
 
 ## Troubleshooting
 
