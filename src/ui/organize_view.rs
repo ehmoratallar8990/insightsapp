@@ -349,8 +349,13 @@ impl InsightApp {
         }
         let o = &self.organize;
         let mut cams: BTreeMap<String, usize> = BTreeMap::new();
+        let mut n_videos = 0usize;
         for p in &scan.photos {
-            *cams.entry(p.camera.clone()).or_default() += 1;
+            if p.camera.is_empty() {
+                n_videos += 1; // videos without camera metadata: their own folder, not a camera
+            } else {
+                *cams.entry(p.camera.clone()).or_default() += 1;
+            }
         }
         let ops = organize::build_ops(scan, &o.events, &o.opts, Path::new(o.dest.trim()));
         let bytes: u64 = ops.iter().map(|op| op.size).sum();
@@ -358,7 +363,7 @@ impl InsightApp {
 
         // ---------- Stats ----------
         let stats = [
-            ("📷", fmt_count(scan.photos.len() as u64), "camera photos".to_string(), pal.accent),
+            ("📷", fmt_count(scan.photos.len() as u64), if n_videos > 0 { format!("camera photos & videos ({n_videos} videos)") } else { "camera photos".to_string() }, pal.accent),
             ("📅", fmt_count(o.events.len() as u64), "events".to_string(), pal.accent2),
             ("🎞", fmt_count(cams.len() as u64), if cams.len() == 1 { "camera".into() } else { "cameras".into() }, GREEN),
             ("🖼", fmt_count(scan.others.len() as u64), format!("not from a camera · {} → {}", human(other_bytes), if o.opts.include_others { "Other images" } else { "left alone" }), AMBER),
@@ -459,7 +464,8 @@ impl InsightApp {
                 let mut breakdown: BTreeMap<String, BTreeMap<Format, usize>> = BTreeMap::new();
                 for &pi in &self.organize.events[i].photos {
                     let ph = &scan.photos[pi];
-                    *breakdown.entry(organize::camera_folder(&self.organize.opts, &ph.camera)).or_default().entry(ph.format).or_default() += 1;
+                    let key = if ph.camera.is_empty() { "Videos".to_string() } else { organize::camera_folder(&self.organize.opts, &ph.camera) };
+                    *breakdown.entry(key).or_default().entry(ph.format).or_default() += 1;
                 }
                 let thumbs: Vec<String> = {
                     let e = &self.organize.events[i];
@@ -497,7 +503,8 @@ impl InsightApp {
                             ui.horizontal_wrapped(|ui| {
                                 for (cam, fmts) in &breakdown {
                                     let parts: Vec<String> = fmts.iter().map(|(f, n)| format!("{} {}", f.folder(), n)).collect();
-                                    ui.label(egui::RichText::new(format!("{cam}: {}", parts.join(" · "))).size(11.5).color(TEXT).background_color(SURFACE3));
+                                    let text = if cam == "Videos" { format!("🎞 {} videos", fmts.values().sum::<usize>()) } else { format!("{cam}: {}", parts.join(" · ")) };
+                                    ui.label(egui::RichText::new(text).size(11.5).color(TEXT).background_color(SURFACE3));
                                 }
                             });
                             if e.days() > 1 || !rejects.is_empty() {
