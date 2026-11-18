@@ -916,6 +916,7 @@ mod tests {
         assert_eq!(owner_of_path("/opt/homebrew/Cellar/llvm/20.1.7/lib/libLLVM.dylib", h).1, "llvm");
         assert_eq!(owner_of_path("/Library/Developer/CommandLineTools/usr/lib/x.dylib", h).1, "CommandLineTools");
         // Only generic folders: grouped by the top of the tree.
-        assert_eq!(owner_of_path("/usr/lib/system/libfoo.dylib", h).1, "/usr/lib");
+        let sep = std::path::MAIN_SEPARATOR.to_string();
+        assert_eq!(owner_of_path("/usr/lib/system/libfoo.dylib", h).1, ["", "usr", "lib"].join(&sep));
     }
 }
