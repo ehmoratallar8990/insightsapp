@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Insight
+GenericName=File Search
+Comment=Find any file instantly, see where your space goes, search photos by what's in them
+Exec=insight
+Icon=insight
+Terminal=false
+Categories=Utility;FileTools;System;
+Keywords=search;files;everything;storage;disk;photos;
+StartupWMClass=insight

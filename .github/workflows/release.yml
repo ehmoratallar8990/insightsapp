@@ -1,0 +1,70 @@
+name: Release
+# Builds Linux and Windows (and macOS) binaries for a tag and attaches them to its GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            asset: Insight-Linux-x86_64.tar.gz
+          - os: windows-latest
+            asset: Insight-Windows-x86_64.zip
+          - os: macos-14
+            asset: Insight-macOS-universal.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release
+          mkdir -p pkg/insight
+          cp target/release/insight pkg/insight/
+          cp assets/icon-256.png pkg/insight/insight.png
+          cp packaging/insight.desktop pkg/insight/
+          tar -C pkg -czf ${{ matrix.asset }} insight
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          Copy-Item target/release/insight.exe pkg/Insight.exe
+          Compress-Archive -Path pkg/* -DestinationPath ${{ matrix.asset }}
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ./scripts/package-macos.sh
+          mv dist/Insight-macOS-universal.zip .
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Insight $TAG" --notes "See README."
+          gh release upload "$TAG" "${{ matrix.asset }}" --clobber
