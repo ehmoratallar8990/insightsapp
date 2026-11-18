@@ -21,16 +21,18 @@ pub enum Page {
     Storage,
     Cleanup,
     Media,
+    Organize,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 6] = [Page::Search, Page::Health, Page::Storage, Page::Cleanup, Page::Media, Page::Settings];
+    pub const ALL: [Page; 7] = [Page::Search, Page::Health, Page::Storage, Page::Cleanup, Page::Media, Page::Organize, Page::Settings];
     fn label(self) -> &'static str {
         match self {
             Page::Search => "Search",
             Page::Health => "Health",
             Page::Cleanup => "Cleanup",
+            Page::Organize => "Organize",
             Page::Storage => "Storage",
             Page::Media => "Media",
             Page::Settings => "Settings",
@@ -41,6 +43,7 @@ impl Page {
             Page::Search => "🔍",
             Page::Health => "💓",
             Page::Cleanup => "✨",
+            Page::Organize => "📂",
             Page::Storage => "📊",
             Page::Media => "🖼",
             Page::Settings => "⚙",
@@ -137,6 +140,10 @@ pub struct InsightApp {
     pub media_grid: Vec<String>,
     pub media_grid_title: String,
     pub media_grid_at: f64,
+    pub media_browse: bool,
+    pub media_browse_at: f64,
+    pub media_map: super::folder_map::FolderMap,
+    pub organize: super::organize_view::OrganizeUi,
 
     // Settings edit buffers
     pub new_root: String,
@@ -228,6 +235,10 @@ impl InsightApp {
             media_grid: Vec::new(),
             media_grid_title: String::new(),
             media_grid_at: 0.0,
+            media_browse: false,
+            media_browse_at: 0.0,
+            media_map: Default::default(),
+            organize: super::organize_view::OrganizeUi::new(),
             new_root: String::new(),
             new_exclude: String::new(),
             confirm_trash: None,
@@ -506,7 +517,7 @@ impl InsightApp {
     fn global_shortcuts(&mut self, ui: &mut Ui) {
         let (cmd, keys) = ui.input(|i| {
             let mut k = Vec::new();
-            for (n, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6].iter().enumerate() {
+            for (n, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6, egui::Key::Num7].iter().enumerate() {
                 if i.key_pressed(*key) {
                     k.push(n);
                 }
@@ -752,6 +763,7 @@ impl eframe::App for InsightApp {
                 Page::Cleanup => self.cleanup_page(&mut child),
                 Page::Storage => self.storage_page(&mut child),
                 Page::Media => self.media_page(&mut child),
+                Page::Organize => self.organize_page(&mut child),
                 Page::Settings => self.settings_page(&mut child),
             }
         });
@@ -776,6 +788,7 @@ impl InsightApp {
                     "storage" => Page::Storage,
                     "health" => Page::Health,
                     "cleanup" => Page::Cleanup,
+                    "organize" => Page::Organize,
                     "media" => Page::Media,
                     "settings" => Page::Settings,
                     _ => Page::Search,
@@ -792,6 +805,16 @@ impl InsightApp {
             if std::env::var("INSIGHT_SORT").is_ok_and(|v| v == "size") {
                 self.sort = SortKey::Size;
                 self.desc = false;
+            }
+            if let Ok(src) = std::env::var("INSIGHT_ORG_SRC") {
+                self.organize.src = src;
+                if std::env::var("INSIGHT_ORG_ANALYZE").is_ok() {
+                    let ctx = ui.ctx().clone();
+                    self.organize_analyze(&ctx);
+                }
+            }
+            if std::env::var("INSIGHT_MEDIA_BROWSE").is_ok() {
+                self.media_browse = true;
             }
             if let Ok(t) = std::env::var("INSIGHT_CLEANUP_TAB") {
                 self.cleanup.tab = t.parse().unwrap_or(0);

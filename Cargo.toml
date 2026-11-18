@@ -31,7 +31,9 @@ egui_extras = { version = "0.37.0", features = ["image", "file"] }
 env_logger = "0.11.11"
 epaint = { version = "0.37.0", features = ["monochrome_emoji_fonts"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "rayon"] }
+jpeg-decoder = { version = "0.3.2", default-features = false }
 jwalk = "0.9.0"
+kamadak-exif = "0.6.2"
 libc = "0.2.191"
 log = "0.4.35"
 memchr = "2.8.3"
@@ -50,6 +52,7 @@ sysinfo = { version = "0.40.4", default-features = false, features = ["disk", "s
 trash = "5.4.0"
 ureq = { version = "3", optional = true }
 xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
+zip = { version = "9.7.0", default-features = false }
 
 # macOS: the media model always runs on the Apple GPU (Metal), falling back to CPU.
 [target.'cfg(target_os = "macos")'.dependencies]

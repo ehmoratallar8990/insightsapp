@@ -11,14 +11,14 @@ use egui::{Align2, Color32, CornerRadius, FontId, Id, Rect, Sense, Stroke, Strok
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-struct Tile {
-    rect: Rect,
-    id: u32, // NONE = aggregated "other"
-    size: u64,
+pub(crate) struct Tile {
+    pub rect: Rect,
+    pub id: u32, // NONE = aggregated "other"
+    pub size: u64,
 }
 
 /// Squarified treemap layout (Bruls et al.).
-fn squarify(items: &[(u32, u64)], rect: Rect) -> Vec<Tile> {
+pub(crate) fn squarify(items: &[(u32, u64)], rect: Rect) -> Vec<Tile> {
     let total: f64 = items.iter().map(|i| i.1 as f64).sum();
     let mut out = Vec::with_capacity(items.len());
     if total <= 0.0 || rect.width() < 1.0 || rect.height() < 1.0 {
@@ -67,7 +67,7 @@ fn squarify(items: &[(u32, u64)], rect: Rect) -> Vec<Tile> {
     out
 }
 
-fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+pub(crate) fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
     Rect::from_min_max(a.min + (b.min - a.min) * t, a.max + (b.max - a.max) * t)
 }
 

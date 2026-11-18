@@ -9,6 +9,7 @@ mod filetype;
 mod health;
 mod index;
 mod media;
+mod organize;
 mod search;
 mod storage;
 mod ui;
@@ -26,7 +27,7 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
-    if let Some(cmd) = args.get(1).filter(|a| ["--cleanup", "--optimize", "--apps", "--update-check", "--update-now", "--health"].contains(&a.as_str())) {
+    if let Some(cmd) = args.get(1).filter(|a| ["--cleanup", "--optimize", "--apps", "--update-check", "--update-now", "--health", "--organize-preview", "--organize-run", "--organize-undo"].contains(&a.as_str())) {
         tools_cli(cmd, &args[2..]);
         return Ok(());
     }
@@ -150,6 +151,54 @@ fn tools_cli(cmd: &str, _args: &[String]) {
                 break;
             }
         }
+        "--organize-preview" => {
+            // Read-only: scan a folder and print the plan (nothing is copied).
+            let src = std::path::PathBuf::from(_args.first().map(String::as_str).unwrap_or("."));
+            let p = organize::Progress::default();
+            let mut scan = organize::scan(&src, None, &p, true);
+            organize::mark_rejects(&mut scan, 0.35);
+            let rej: Vec<_> = scan.photos.iter().filter(|p| p.reject).collect();
+            let mut sh: Vec<f32> = scan.photos.iter().filter_map(|p| p.quality.map(|q| q.sharpness)).collect();
+            sh.sort_by(|a, b| a.total_cmp(b));
+            if !sh.is_empty() { eprintln!("sharpness p5 {:.0} p25 {:.0} p50 {:.0} p90 {:.0}; rejects {}", sh[sh.len()/20], sh[sh.len()/4], sh[sh.len()/2], sh[sh.len()*9/10], rej.len()); }
+            for r in rej.iter().take(12) { eprintln!("  reject {:?} {}", r.quality, r.path.display()); }
+            eprintln!("{} camera photos, {} other images, {} unreadable in {:?}", scan.photos.len(), scan.others.len(), scan.unreadable, t.elapsed());
+            let opts = organize::Options::default();
+            let events = organize::plan(&scan, &opts, &src, &|_| None);
+            let mut cams: std::collections::BTreeMap<String, usize> = Default::default();
+            for ph in &scan.photos {
+                *cams.entry(ph.camera.clone()).or_default() += 1;
+            }
+            println!("cameras: {cams:?}");
+            for e in events.iter().take(25) {
+                println!("{}/{}  ({} photos)", e.start.format("%Y"), e.folder(), e.photos.len());
+            }
+            if events.len() > 25 {
+                println!("… {} events total", events.len());
+            }
+            for (o, _) in scan.others.iter().take(5) {
+                println!("  not a camera photo: {}", o.display());
+            }
+        }
+        "--organize-run" => {
+            // insight --organize-run <src> <dest>  (defaults; copies, never moves)
+            let src = std::path::PathBuf::from(&_args[0]);
+            let dest = std::path::PathBuf::from(&_args[1]);
+            let p = organize::Progress::default();
+            let mut scan = organize::scan(&src, Some(&dest), &p, true);
+            organize::mark_rejects(&mut scan, 0.35);
+            let opts = organize::Options::default();
+            let events = organize::plan(&scan, &opts, &src, &|_| None);
+            let ops = organize::build_ops(&scan, &events, &opts, &dest);
+            match organize::execute(&ops, opts.symlink, &dest, &p) {
+                Ok(r) => println!("created {} · already there {} · failed {} · manifest {:?}", r.created, r.already_there, r.failed.len(), r.manifest),
+                Err(e) => println!("error: {e:#}"),
+            }
+        }
+        "--organize-undo" => match organize::last_manifest(std::path::Path::new(&_args[0])) {
+            Some(m) => println!("{:?}", organize::undo(&m).map_err(|e| e.to_string())),
+            None => println!("nothing to undo"),
+        },
         "--health" => {
             let ctx = egui::Context::default();
             let m = health::Monitor::start(ctx);

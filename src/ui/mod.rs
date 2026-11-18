@@ -1,7 +1,9 @@
 pub mod app;
 pub mod cleanup_view;
+pub mod folder_map;
 mod health_view;
 mod media_view;
+pub mod organize_view;
 mod search_view;
 mod settings_view;
 mod storage_view;

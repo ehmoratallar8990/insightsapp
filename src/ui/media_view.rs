@@ -157,6 +157,10 @@ impl InsightApp {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Photos in").color(MUTED));
                         ui.add(egui::TextEdit::singleline(&mut self.settings.media_scope).desired_width(300.0));
+                        if theme::chip(ui, "📁 Browse folders", self.media_browse, pal.accent2, Id::unique("media-browse")).clicked() {
+                            self.media_browse = !self.media_browse;
+                            self.media_browse_at = ui.input(|i| i.time);
+                        }
                         let label = if clip::is_downloaded() { "Analyze photos" } else { "Download model (≈600 MB) & analyze" };
                         if theme::primary_button(ui, label, pal).clicked() {
                             let items = crate::media::candidates(&self.engine.index.read(), &self.settings.media_scope);
@@ -165,6 +169,15 @@ impl InsightApp {
                             self.toast(ui, format!("Queued {} photos for analysis", fmt_count(n as u64)));
                         }
                     });
+                    if self.media_browse {
+                        ui.add_space(8.0);
+                        let eng = self.engine.clone();
+                        if self.media_map.show(ui, &eng, pal, "media-map", &mut self.settings.media_scope, 300.0) {
+                            self.media_browse = false;
+                            self.toast(ui, "Folder selected — press Analyze photos");
+                        }
+                        ui.add_space(6.0);
+                    }
                     ui.label(
                         egui::RichText::new("Already-analyzed photos are skipped; changed files are re-analyzed. Formats: JPEG, PNG, WebP, GIF, BMP, TIFF, HEIC (macOS).")
                             .size(11.5)

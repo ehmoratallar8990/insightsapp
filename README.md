@@ -21,6 +21,14 @@ you search your photos by what's in them, all on your own machine. It keeps itse
 |---|---|
 | ![Apps tree](docs/apps-tree.jpg) | |
 
+| Organize photos: editable preview | Organize options |
+|---|---|
+| ![Organize preview](docs/organize.jpg) | ![Organize options](docs/organize-options.jpg) |
+
+| Photo folder map (Media) | |
+|---|---|
+| ![Photo folders](docs/media-folders.jpg) | |
+
 | Media labels | Search photos in plain language |
 |---|---|
 | ![Media](docs/media.jpg) | ![Semantic search](docs/semantic.jpg) |
@@ -44,6 +52,9 @@ does one job quickly.
   project-folder purge.
 - **Always current:** checks GitHub releases, downloads updates in the background, verifies them with SHA-256 and
   installs them when you quit.
+- **Photo organizer for messy photographers:** point it at a card dump or a chaotic Pictures folder and it
+  sorts camera photos into `2025 / 2025-07-14 Wedding / Canon EOS R8 / RAW`, moves blurry shots to `Rejects`,
+  and shows an editable preview first. It copies, never moves, and can undo.
 - **Photos by content:** an on-device AI model labels your photos (beach, receipt, screenshot, dog…) and lets you
   search them in plain language (*"mountains reflected in a lake"*).
 - **Private:** nothing is uploaded. Network use is limited to the update check (GitHub), the one-time model
@@ -68,6 +79,8 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 | Find project build folders (`node_modules`, `target`…) | walk the disk | **17 ms** (answered from the index) | |
 | List installed apps with sizes | — | **1.2 s** (66 apps) | |
 | Health panel refresh | — | **1×/s**, sampler idle when the page is hidden | |
+| Organize: read camera data (2,058 photos, JPEG + CR3) | — | **0.6 s** | headers only |
+| Organize: focus / exposure check | — | **≈160 photos/s** (12.6 s for 2,058) | optional |
 | Photo understanding (CLIP ViT-B/32) | — | **91 img/s** on the Apple GPU, 42 img/s on CPU | |
 | App download | — | **12 MB** (universal macOS zip) | |
 
@@ -99,7 +112,7 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 - Filter chips: Folders, Images, Videos, Audio, Documents, Archives, Code, Apps.
 - Matches highlighted in the results, plus a detail panel with a preview, size, dates, full path and AI labels.
 - Keyboard first: type anywhere to search, ↑/↓ to move, **Enter** to open, **⌘/Ctrl+Enter** to reveal in
-  Finder/Explorer, **⌘/Ctrl+C** to copy the path, **Esc** to clear. **⌘1–6** switch tabs.
+  Finder/Explorer, **⌘/Ctrl+C** to copy the path, **Esc** to clear. **⌘1–7** switch tabs.
 - Right-click a result to open, reveal, copy the path or name, or move it to the Trash.
 
 - **Group by app:** the Apps filter shows results as a tree under the app or package that owns them
@@ -175,7 +188,37 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
   atomic rename, so a failed update leaves the current version untouched. Both behaviours can be turned off in
   Settings → Updates.
 
+**Organize** (photos, fully on device, free)
+- **Only real camera photos:** a file is organized when its EXIF has a camera make/model and a capture time
+  (JPEG, HEIC, PNG/TIFF, and RAW: CR3, CR2, NEF, ARW, RAF, DNG, ORF, RW2…; only the header is read).
+  Screenshots, downloads and exports without camera data are listed and left alone (or copied to
+  `Other images` if you want).
+- **Structure:** `Year / YYYY-MM-DD Event / Camera / RAW | JPG | HEIC | Other formats`. Event folders start with
+  the date so they sort chronologically. Cameras get readable names (`Canon EOS R8`, `iPhone 15 Pro`,
+  `Canon EOS M50 Mark II`) that you can rename.
+- **Events** are found by gaps in capture time (adjustable, default 6 h) across all cameras, so the iPhone and
+  the R8 at the same wedding land together. Back-to-back days from one named folder stay one event
+  (`Lisbon trip`). **Split into days** gives `Lisbon trip / Day 1 - 2025-09-12 / …`.
+- **Suggested names** come from your folder names (ignoring `DCIM`, `100CANON`, `Card dump`…), else from the
+  on-device photo labels (*Dog*, *Food*, *Wedding*), else the time of day. Rename any of them in the preview.
+- **Descriptive file names:** `IMG_0412.CR3` → `IMG_0412_beach.CR3` (content label, else the event name); RAW
+  files borrow their JPEG twin's label.
+- **Rejects:** a fast focus and exposure check (Laplacian sharpness of the best region, on a ⅛-scale decode or
+  the CR3's built-in preview) moves missed-focus, motion-blurred and black or blown-out frames to `Rejects` inside
+  their camera folder. Shallow depth of field is fine, because only frames with *nothing* sharp are rejected.
+  RAW+JPEG twins move together. Adjust the sensitivity, then review the rejects with thumbnails and click to keep one.
+- **Formats:** pick RAW / JPEG / HEIC / other, keep them in separate folders or together, and optionally pack RAWs
+  into one `RAW.zip` per camera and event.
+- **Tags:** for everything and per event, written as Finder tags on macOS (`user.xdg.tags` on Linux).
+- **Symlinks** instead of copies (off by default): no space used; links point at the originals.
+- **Non-destructive:** originals are only read. Copies are written to a temp name and renamed when complete,
+  existing files are never overwritten, and re-running skips what's already there. On the same APFS volume,
+  copies are clones and use almost no extra space. Each run writes a manifest, and **Undo** removes exactly
+  what it created.
+
 **Media**
+- **Photo folder map:** a zoomable treemap of the folders that hold your photos, weighted by size and showing
+  photo counts, with breadcrumbs. Pick a folder to analyze with one click.
 - Counts and sizes of images, videos and audio.
 - **Labels:** 94 zero-shot categories (people, pets, places, food, documents, receipts, screenshots, UI
   designs, memes…), shown as a clickable cloud and searchable with `label:`.
@@ -289,6 +332,7 @@ cargo test --release                   # unit tests (walker, index, query engine
 ./target/release/insight --cli --purge                # project build folders from the index
 ./target/release/insight --apps                       # installed apps + leftovers
 ./target/release/insight --update-check               # is a newer release available?
+./target/release/insight --organize-preview ~/Pictures/Card  # photo-organizer plan (read-only)
 ```
 
 - **macOS:** `./scripts/package-macos.sh` produces a universal, ad-hoc signed `dist/Insight.app` and zip.
