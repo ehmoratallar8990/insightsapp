@@ -30,16 +30,18 @@ pub enum Format {
     Jpeg,
     Heic,
     Other,
+    Video,
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::Raw, Format::Jpeg, Format::Heic, Format::Other];
+    pub const ALL: [Format; 5] = [Format::Raw, Format::Jpeg, Format::Heic, Format::Other, Format::Video];
     pub fn folder(self) -> &'static str {
         match self {
             Format::Raw => "RAW",
             Format::Jpeg => "JPG",
             Format::Heic => "HEIC",
             Format::Other => "Other formats",
+            Format::Video => "Videos",
         }
     }
     pub fn label(self) -> &'static str {
@@ -48,6 +50,7 @@ impl Format {
             Format::Jpeg => "JPEG",
             Format::Heic => "HEIC / HEIF",
             Format::Other => "PNG, TIFF & other",
+            Format::Video => "Videos",
         }
     }
 }
@@ -61,6 +64,7 @@ pub fn format_of(ext: &str) -> Option<Format> {
         "jpg" | "jpeg" | "jpe" => Format::Jpeg,
         "heic" | "heif" | "hif" => Format::Heic,
         "png" | "tif" | "tiff" | "webp" | "avif" | "jxl" => Format::Other,
+        "mp4" | "mov" | "m4v" | "mts" | "m2ts" | "avi" | "mkv" | "3gp" | "crm" => Format::Video,
         _ => return None,
     })
 }
@@ -310,6 +314,10 @@ pub fn read_meta(path: &Path) -> Option<Meta> {
     let mut m = Meta::default();
     let reader = exif::Reader::new();
     match ext.as_str() {
+        "mp4" | "mov" | "m4v" | "3gp" | "crm" => {
+            m.taken = video_created(&mut f);
+        }
+        "mts" | "m2ts" | "avi" | "mkv" => {}
         "cr3" => {
             // Canon CR3 (ISO BMFF): TIFF blocks live in CMT1 (IFD0) and CMT2 (Exif IFD).
             let mut head = Vec::new();
@@ -370,6 +378,25 @@ pub fn read_meta(path: &Path) -> Option<Meta> {
         }
     }
     Some(m)
+}
+
+/// Capture time of an MP4 / MOV from the `mvhd` box (seconds since 1904, UTC).
+/// The box sits near the start or the end of the file; only those are read.
+fn video_created(f: &mut std::fs::File) -> Option<NaiveDateTime> {
+    let len = f.metadata().ok()?.len();
+    let mut look = |off: u64| -> Option<NaiveDateTime> {
+        let mut buf = Vec::new();
+        f.seek(std::io::SeekFrom::Start(off)).ok()?;
+        f.by_ref().take(4 << 20).read_to_end(&mut buf).ok()?;
+        let p = memchr::memmem::find(&buf, b"mvhd")?;
+        let v = *buf.get(p + 4)?;
+        let secs = if v == 1 { u64::from_be_bytes(buf.get(p + 8..p + 16)?.try_into().ok()?) } else { u32::from_be_bytes(buf.get(p + 8..p + 12)?.try_into().ok()?) as u64 };
+        let unix = secs.checked_sub(2_082_844_800)? as i64;
+        let utc = chrono::DateTime::from_timestamp(unix, 0)?;
+        let local: chrono::DateTime<chrono::Local> = utc.into();
+        Some(local.naive_local()).filter(|d| d.year() > 2000)
+    };
+    look(0).or_else(|| look(len.saturating_sub(4 << 20)))
 }
 
 /// Human camera name: "Canon EOS R8", "iPhone 15 Pro", "Nikon Z 6", "Sony ILCE-7M4".
@@ -479,8 +506,19 @@ pub fn scan(src: &Path, dest: Option<&Path>, progress: &Progress, quality: bool)
         let taken = m.taken.or_else(|| {
             (fmt == Format::Raw).then(|| file_time(&path)).flatten()
         });
-        match (has_camera || fmt == Format::Raw, taken) {
-            (true, Some(t)) => s.photos.push(Photo { path, size, taken: t, camera: camera_name(&m.make, &m.model), format: fmt, quality: None, reject: false, label: None }),
+        let video = fmt == Format::Video;
+        match (has_camera || fmt == Format::Raw || video, taken) {
+            (true, Some(t)) => s.photos.push(Photo {
+                path,
+                size,
+                taken: t,
+                camera: if video && !has_camera { String::new() } else { camera_name(&m.make, &m.model) },
+                format: fmt,
+                quality: None,
+                reject: false,
+                label: None,
+            }),
+            (true, None) if video => s.others.push((path, size)),
             _ => s.others.push((path, size)),
         }
     }
@@ -535,11 +573,14 @@ impl Event {
 pub struct Options {
     /// Start a new event after this many hours without photos.
     pub gap_hours: f32,
-    pub formats: [bool; 4],
+    pub formats: [bool; 5],
     pub split_formats: bool,
     pub zip_raw: bool,
-    pub symlink: bool,
-    /// Copy images without camera metadata into `<dest>/Other images/`.
+    /// Move into the destination (copy → verify → remove original). Off = copy.
+    pub move_files: bool,
+    /// After a move, leave a symlink at the original path pointing to the new file.
+    pub link_back: bool,
+    /// Also bring images without camera metadata into `<dest>/Other images/`.
     pub include_others: bool,
     /// Tags applied to everything (comma separated).
     pub tags: String,
@@ -559,11 +600,12 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             gap_hours: 6.0,
-            formats: [true; 4],
+            formats: [true; 5],
             split_formats: true,
             zip_raw: false,
-            symlink: false,
-            include_others: false,
+            move_files: true,
+            link_back: false,
+            include_others: true,
             tags: String::new(),
             suffix: true,
             rejects: true,
@@ -780,10 +822,18 @@ pub fn build_ops(scan: &Scan, events: &[Event], opts: &Options, dest: &Path) -> 
         for &i in &e.photos {
             let p = &scan.photos[i];
             let fi = Format::ALL.iter().position(|f| *f == p.format).unwrap_or(3);
+            if p.format == Format::Video && !opts.formats[4] {
+                continue;
+            }
             if !opts.formats[fi] {
                 continue;
             }
             let day = if e.by_day { base.join(e.day_folder(p.taken)) } else { base.clone() };
+            if p.format == Format::Video {
+                let dir = if p.camera.is_empty() { day.join("Videos") } else { day.join(camera_folder(opts, &p.camera)).join("Videos") };
+                ops.push(Op { src: p.path.clone(), dst: dir.join(file_name(p, opts.suffix, &event_slug)), zip: false, size: p.size, tags: tags.clone() });
+                continue;
+            }
             let mut dir = day.join(camera_folder(opts, &p.camera));
             let reject = opts.rejects && p.reject;
             let zip = opts.zip_raw && p.format == Format::Raw && !reject;
@@ -820,41 +870,109 @@ pub fn build_ops(scan: &Scan, events: &[Event], opts: &Options, dest: &Path) -> 
     ops
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Copy → verify → remove the original. Everything ends up in the destination.
+    Move,
+    /// Verified copy; originals stay.
+    Copy,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Report {
-    pub created: usize,
+    /// Files now in the destination (copied or moved).
+    pub placed: usize,
+    /// Originals removed after their copy was verified.
+    pub moved: usize,
+    /// Links left at the original locations.
+    pub linked: usize,
     pub already_there: usize,
     pub failed: Vec<(String, String)>,
     pub bytes: u64,
+    /// Source folders left empty by the move and removed.
+    pub removed_dirs: usize,
     pub manifest: Option<PathBuf>,
 }
 
-/// Run the plan. Originals are only ever read.
-pub fn execute(ops: &[Op], symlink: bool, dest: &Path, progress: &Progress) -> Result<Report> {
+/// One manifest line: enough to put everything back.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct Entry {
+    src: PathBuf,
+    dst: PathBuf,
+    /// Member name when `dst` is a RAW.zip.
+    zip_name: Option<String>,
+    /// xxh3-128 of the content (hex).
+    hash: String,
+    moved: bool,
+    linked: bool,
+    /// The identical file was already in the destination before this run.
+    existed: bool,
+}
+
+/// Content hash used to verify every copy before an original is removed.
+pub fn hash_file(p: &Path) -> Result<u128> {
+    let mut f = std::fs::File::open(p).with_context(|| format!("read {}", p.display()))?;
+    let mut h = xxhash_rust::xxh3::Xxh3::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.digest128())
+}
+
+fn same_volume(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let dev = |p: &Path| p.ancestors().find_map(|x| std::fs::metadata(x).ok()).map(|m| m.dev());
+        dev(a).is_some() && dev(a) == dev(b)
+    }
+    #[cfg(not(unix))]
+    {
+        a.components().next() == b.components().next()
+    }
+}
+
+/// True when moving from `src` to `dest` needs no extra space (same drive: copies are clones).
+pub fn free_move(src: &Path, dest: &Path) -> bool {
+    same_volume(src, dest) && cfg!(target_os = "macos")
+}
+
+fn make_link(target: &Path, at: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, at)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, at)
+    }
+}
+
+/// Run the plan. In `Move` mode an original is removed only after its copy in the
+/// destination has been read back and hashes identical.
+pub fn execute(ops: &[Op], mode: Mode, link_back: bool, src_root: &Path, dest: &Path, progress: &Progress) -> Result<Report> {
     std::fs::create_dir_all(dest).with_context(|| format!("can't create {}", dest.display()))?;
     progress.total.store(ops.len() as u64, Ordering::Relaxed);
     progress.done.store(0, Ordering::Relaxed);
     progress.bytes.store(0, Ordering::Relaxed);
-    let mut report = Report::default();
-    let created = parking_lot::Mutex::new(Vec::<PathBuf>::new());
+    let entries = parking_lot::Mutex::new(Vec::<Entry>::new());
     let failed = parking_lot::Mutex::new(Vec::<(String, String)>::new());
-    let already = AtomicU64::new(0);
 
-    // Loose files in parallel.
     ops.par_iter().filter(|o| !o.zip).for_each(|op| {
         if progress.cancel.load(Ordering::Relaxed) {
             return;
         }
-        let r = place(op, symlink);
-        match r {
-            Ok(true) => {
-                created.lock().push(op.dst.clone());
+        match place(op, mode, link_back) {
+            Ok(e) => {
                 if !op.tags.is_empty() {
-                    let _ = set_tags(&op.dst, &op.tags, symlink);
+                    let _ = set_tags(&op.dst, &op.tags, false);
                 }
-            }
-            Ok(false) => {
-                already.fetch_add(1, Ordering::Relaxed);
+                entries.lock().push(e);
             }
             Err(e) => failed.lock().push((op.src.display().to_string(), format!("{e:#}"))),
         }
@@ -862,7 +980,6 @@ pub fn execute(ops: &[Op], symlink: bool, dest: &Path, progress: &Progress) -> R
         progress.bytes.fetch_add(op.size, Ordering::Relaxed);
     });
 
-    // Zips: one writer per archive, archives in parallel.
     let mut zips: BTreeMap<PathBuf, Vec<&Op>> = BTreeMap::new();
     for op in ops.iter().filter(|o| o.zip) {
         zips.entry(op.dst.clone()).or_default().push(op);
@@ -871,99 +988,183 @@ pub fn execute(ops: &[Op], symlink: bool, dest: &Path, progress: &Progress) -> R
         if progress.cancel.load(Ordering::Relaxed) {
             return;
         }
-        match write_zip(&zpath, &members, progress) {
-            Ok(true) => {
-                created.lock().push(zpath.clone());
+        match zip_members(&zpath, &members, mode, progress) {
+            Ok(es) => {
                 if let Some(t) = members.first().map(|m| &m.tags).filter(|t| !t.is_empty()) {
                     let _ = set_tags(&zpath, t, false);
                 }
-            }
-            Ok(false) => {
-                already.fetch_add(members.len() as u64, Ordering::Relaxed);
-                progress.done.fetch_add(members.len() as u64, Ordering::Relaxed);
+                entries.lock().extend(es);
             }
             Err(e) => failed.lock().push((zpath.display().to_string(), format!("{e:#}"))),
         }
     });
 
-    report.created = created.lock().len();
-    report.already_there = already.load(Ordering::Relaxed) as usize;
-    report.failed = failed.into_inner();
-    report.bytes = progress.bytes.load(Ordering::Relaxed);
-    let created = created.into_inner();
-    if !created.is_empty() {
-        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let m = dest.join(format!(".insight-organize-{stamp}.json"));
-        let json = serde_json::json!({ "created": created, "symlink": symlink, "version": 1 });
+    let entries = entries.into_inner();
+    let mut report = Report {
+        placed: entries.iter().filter(|e| !e.existed).count(),
+        moved: entries.iter().filter(|e| e.moved).count(),
+        linked: entries.iter().filter(|e| e.linked).count(),
+        already_there: entries.iter().filter(|e| e.existed).count(),
+        failed: failed.into_inner(),
+        bytes: progress.bytes.load(Ordering::Relaxed),
+        ..Default::default()
+    };
+    if mode == Mode::Move {
+        report.removed_dirs = prune_empty(entries.iter().filter(|e| e.moved && !e.linked).map(|e| e.src.as_path()), src_root);
+    }
+    if !entries.is_empty() {
+        // Unique even for runs within the same second: never overwrite an undo record.
+        static RUN: AtomicU64 = AtomicU64::new(0);
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
+        let mut m = dest.join(format!(".insight-organize-{stamp}.json"));
+        while m.exists() {
+            m = dest.join(format!(".insight-organize-{stamp}-{}.json", RUN.fetch_add(1, Ordering::Relaxed)));
+        }
+        let json = serde_json::json!({ "version": 2, "mode": if mode == Mode::Move { "move" } else { "copy" }, "entries": entries });
         std::fs::write(&m, serde_json::to_vec_pretty(&json)?)?;
         report.manifest = Some(m);
     }
     Ok(report)
 }
 
-/// Copy / link one file. Ok(false) = identical file already there.
-fn place(op: &Op, symlink: bool) -> Result<bool> {
-    if let Ok(m) = std::fs::symlink_metadata(&op.dst) {
-        if m.len() == op.size || (m.file_type().is_symlink() && std::fs::read_link(&op.dst).ok().as_deref() == Some(op.src.as_path())) {
-            return Ok(false);
+/// Copy (clone) to a temp name, fsync, rename, read back and compare hashes; then,
+/// for a move, remove the original (and optionally leave a link in its place).
+fn place(op: &Op, mode: Mode, link_back: bool) -> Result<Entry> {
+    let src_hash = hash_file(&op.src)?;
+    let existed = match std::fs::symlink_metadata(&op.dst) {
+        Ok(m) if m.is_file() && m.len() == op.size && hash_file(&op.dst)? == src_hash => true,
+        Ok(_) => anyhow::bail!("a different file already exists at {}", op.dst.display()),
+        Err(_) => false,
+    };
+    if !existed {
+        if let Some(d) = op.dst.parent() {
+            std::fs::create_dir_all(d)?;
         }
-        anyhow::bail!("a different file already exists at {}", op.dst.display());
-    }
-    if let Some(d) = op.dst.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    if symlink {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&op.src, &op.dst)?;
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&op.src, &op.dst).context("Windows needs Developer Mode for symlinks")?;
-    } else {
-        // Copy to a temp name, then rename: no half-written files on failure.
-        // (std::fs::copy clones on APFS, so same-volume copies are instant and free.)
         let tmp = op.dst.with_extension(format!("{}.part", op.dst.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()));
+        // std::fs::copy clones on APFS: same-drive copies are instant and share storage.
         std::fs::copy(&op.src, &tmp).with_context(|| format!("copy {}", op.src.display()))?;
-        if let Ok(t) = std::fs::metadata(&op.src).and_then(|m| m.modified()) {
-            let _ = std::fs::File::options().write(true).open(&tmp).and_then(|f| f.set_modified(t));
+        {
+            let f = std::fs::File::options().write(true).open(&tmp)?;
+            if let Ok(t) = std::fs::metadata(&op.src).and_then(|m| m.modified()) {
+                let _ = f.set_modified(t);
+            }
+            f.sync_all()?;
         }
         std::fs::rename(&tmp, &op.dst)?;
+        if hash_file(&op.dst)? != src_hash {
+            let _ = std::fs::remove_file(&op.dst);
+            anyhow::bail!("verification failed for {} — original kept", op.src.display());
+        }
     }
-    Ok(true)
+    let mut e = Entry { src: op.src.clone(), dst: op.dst.clone(), zip_name: None, hash: format!("{src_hash:032x}"), moved: false, linked: false, existed };
+    if mode == Mode::Move {
+        std::fs::remove_file(&op.src).with_context(|| format!("remove original {}", op.src.display()))?;
+        e.moved = true;
+        if link_back {
+            e.linked = make_link(&op.dst, &op.src).is_ok();
+        }
+    }
+    Ok(e)
 }
 
-fn write_zip(zpath: &Path, members: &[&Op], progress: &Progress) -> Result<bool> {
-    if zpath.exists() {
-        return Ok(false);
-    }
-    if let Some(d) = zpath.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    let tmp = zpath.with_extension("zip.part");
-    let f = std::fs::File::create(&tmp)?;
-    let mut z = zip::ZipWriter::new(std::io::BufWriter::new(f));
-    // RAW data is already compressed; storing is as small and much faster.
-    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
+/// Pack RAWs into one archive, read every member back and verify it, then (move)
+/// remove the originals. An existing archive is accepted only if it already holds
+/// identical members.
+fn zip_members(zpath: &Path, members: &[&Op], mode: Mode, progress: &Progress) -> Result<Vec<Entry>> {
     let mut names: HashMap<String, usize> = HashMap::new();
-    for m in members {
-        if progress.cancel.load(Ordering::Relaxed) {
-            drop(z);
-            let _ = std::fs::remove_file(&tmp);
-            anyhow::bail!("cancelled");
+    let planned: Vec<(&Op, String, u128)> = members
+        .iter()
+        .map(|m| {
+            let mut name = m.src.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let n = names.entry(name.clone()).or_default();
+            *n += 1;
+            if *n > 1 {
+                name = format!("{name} ({n})");
+            }
+            Ok((*m, name, hash_file(&m.src)?))
+        })
+        .collect::<Result<_>>()?;
+    let existed = zpath.exists();
+    if !existed {
+        if let Some(d) = zpath.parent() {
+            std::fs::create_dir_all(d)?;
         }
-        let mut name = m.src.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let n = names.entry(name.clone()).or_default();
-        *n += 1;
-        if *n > 1 {
-            name = format!("{} ({n})", name);
+        let tmp = zpath.with_extension("zip.part");
+        let f = std::fs::File::create(&tmp)?;
+        let mut z = zip::ZipWriter::new(std::io::BufWriter::new(f));
+        // RAW data is already compressed; storing is as small and much faster.
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
+        for (m, name, _) in &planned {
+            if progress.cancel.load(Ordering::Relaxed) {
+                drop(z);
+                let _ = std::fs::remove_file(&tmp);
+                anyhow::bail!("cancelled");
+            }
+            z.start_file(name.as_str(), opts)?;
+            std::io::copy(&mut std::fs::File::open(&m.src)?, &mut z)?;
         }
-        z.start_file(name, opts)?;
-        let mut src = std::fs::File::open(&m.src)?;
-        std::io::copy(&mut src, &mut z)?;
+        let w = z.finish()?;
+        w.into_inner().map_err(|e| anyhow::anyhow!("{e}"))?.sync_all()?;
+        std::fs::rename(&tmp, zpath)?;
+    }
+    // Verify every member against its original.
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(zpath)?)?;
+    for (_, name, h) in &planned {
+        let mut entry = archive.by_name(name).with_context(|| format!("{name} missing from {}", zpath.display()))?;
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = entry.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        if hasher.digest128() != *h {
+            if !existed {
+                let _ = std::fs::remove_file(zpath);
+            }
+            anyhow::bail!("{name} in {} doesn't match the original — originals kept", zpath.display());
+        }
+    }
+    let mut out = Vec::new();
+    for (m, name, h) in planned {
+        let mut e = Entry { src: m.src.clone(), dst: zpath.to_path_buf(), zip_name: Some(name), hash: format!("{h:032x}"), moved: false, linked: false, existed };
+        if mode == Mode::Move {
+            std::fs::remove_file(&m.src)?;
+            e.moved = true;
+        }
         progress.done.fetch_add(1, Ordering::Relaxed);
         progress.bytes.fetch_add(m.size, Ordering::Relaxed);
+        out.push(e);
     }
-    z.finish()?;
-    std::fs::rename(&tmp, zpath)?;
-    Ok(true)
+    Ok(out)
+}
+
+/// Remove folders the move left empty (ignoring Finder's .DS_Store), never `root` itself.
+fn prune_empty<'a>(paths: impl Iterator<Item = &'a Path>, root: &Path) -> usize {
+    let mut dirs = std::collections::BTreeSet::new();
+    for p in paths {
+        let mut d = p.parent();
+        while let Some(x) = d {
+            if x == root || !x.starts_with(root) {
+                break;
+            }
+            dirs.insert(x.to_path_buf());
+            d = x.parent();
+        }
+    }
+    let mut n = 0;
+    for d in dirs.iter().rev() {
+        let names: Vec<String> = std::fs::read_dir(d).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        if names.iter().all(|n| n == ".DS_Store") {
+            let _ = std::fs::remove_file(d.join(".DS_Store"));
+            if std::fs::remove_dir(d).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// Finder tags (macOS) / `user.xdg.tags` (Linux). Never touches a link's target.
@@ -1005,35 +1206,82 @@ pub fn set_tags(path: &Path, tags: &[String], is_link: bool) -> Result<()> {
     }
 }
 
-/// Remove what a run created (only those paths; originals are never touched).
+/// Put things back exactly as they were: moved files return to their original paths
+/// (verified), links are removed, copies this run created are deleted.
 pub fn undo(manifest: &Path) -> Result<usize> {
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest)?)?;
     let dest = manifest.parent().unwrap_or(Path::new("/")).to_path_buf();
-    let mut n = 0;
-    let mut dirs = std::collections::BTreeSet::new();
-    for p in v["created"].as_array().cloned().unwrap_or_default() {
-        let Some(p) = p.as_str().map(PathBuf::from) else { continue };
-        if !p.starts_with(&dest) {
+    let entries: Vec<Entry> = serde_json::from_value(v["entries"].clone()).unwrap_or_default();
+    let mut restored = 0;
+    let mut errors = Vec::new();
+    let mut zips_to_remove = std::collections::BTreeSet::new();
+    let mut dest_dirs = std::collections::BTreeSet::new();
+    for e in &entries {
+        if !e.dst.starts_with(&dest) {
             continue;
         }
-        if std::fs::remove_file(&p).is_ok() {
-            n += 1;
+        let r: Result<()> = (|| {
+            if e.linked && std::fs::symlink_metadata(&e.src).is_ok_and(|m| m.file_type().is_symlink()) {
+                std::fs::remove_file(&e.src)?;
+            }
+            if e.moved {
+                if let Some(d) = e.src.parent() {
+                    std::fs::create_dir_all(d)?;
+                }
+                let tmp = e.src.with_extension("insight-restore");
+                if let Some(name) = &e.zip_name {
+                    let mut a = zip::ZipArchive::new(std::fs::File::open(&e.dst)?)?;
+                    std::io::copy(&mut a.by_name(name)?, &mut std::fs::File::create(&tmp)?)?;
+                } else if e.existed {
+                    std::fs::copy(&e.dst, &tmp)?;
+                } else if std::fs::rename(&e.dst, &e.src).is_ok() {
+                    return Ok(()); // same drive: an atomic rename back
+                } else {
+                    std::fs::copy(&e.dst, &tmp)?;
+                }
+                if format!("{:032x}", hash_file(&tmp)?) != e.hash {
+                    let _ = std::fs::remove_file(&tmp);
+                    anyhow::bail!("restored copy of {} doesn't verify", e.src.display());
+                }
+                std::fs::rename(&tmp, &e.src)?;
+                if e.zip_name.is_none() && !e.existed {
+                    std::fs::remove_file(&e.dst)?;
+                }
+            } else if !e.existed && e.zip_name.is_none() {
+                std::fs::remove_file(&e.dst)?;
+            }
+            Ok(())
+        })();
+        match r {
+            Ok(()) => restored += 1,
+            Err(err) => errors.push(format!("{err:#}")),
         }
-        let mut d = p.parent();
+        if e.zip_name.is_some() && !e.existed {
+            zips_to_remove.insert(e.dst.clone());
+        }
+        let mut d = e.dst.parent();
         while let Some(x) = d {
             if x == dest {
                 break;
             }
-            dirs.insert(x.to_path_buf());
+            dest_dirs.insert(x.to_path_buf());
             d = x.parent();
         }
     }
-    // Deepest first; only removes folders that ended up empty.
-    for d in dirs.iter().rev() {
+    if errors.is_empty() {
+        for z in &zips_to_remove {
+            let _ = std::fs::remove_file(z);
+        }
+    }
+    for d in dest_dirs.iter().rev() {
+        let _ = std::fs::remove_file(d.join(".DS_Store"));
         let _ = std::fs::remove_dir(d);
     }
+    if !errors.is_empty() {
+        anyhow::bail!("{} item(s) couldn't be restored (manifest kept): {}", errors.len(), errors[0]);
+    }
     let _ = std::fs::remove_file(manifest);
-    Ok(n)
+    Ok(restored)
 }
 
 /// Most recent manifest in `dest`, for "Undo last run".
@@ -1100,7 +1348,10 @@ mod tests {
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/Canon EOS R8/RAW/IMG_1.CR3".to_string()));
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/Canon EOS R8/JPG/IMG_1.JPG".to_string()));
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/iPhone 15 Pro/HEIC/IMG_9.HEIC".to_string()));
-        assert_eq!(ops.len(), 4, "screenshots are left alone by default");
+        assert_eq!(ops.len(), 5);
+        assert!(dsts.contains(&"/dest/Other images/Screenshot.png".to_string()), "non-camera images go to Other images");
+        let only_camera = build_ops(&scan, &ev, &Options { include_others: false, suffix: false, ..Default::default() }, Path::new("/dest"));
+        assert_eq!(only_camera.len(), 4);
         // Suffixes (label shared with the RAW twin), rejects, day folders.
         let mut scan2 = scan.clone();
         scan2.photos[1].label = Some("bride and groom".into());
@@ -1113,7 +1364,7 @@ mod tests {
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/Day 1 - 2024-07-14/Canon EOS R8/RAW/IMG_1_bride-and-groom.CR3".to_string()), "{dsts:?}");
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/Day 1 - 2024-07-14/iPhone 15 Pro/Rejects/IMG_9_wedding.HEIC".to_string()), "{dsts:?}");
         // Zip RAWs, JPEG only off, renamed camera.
-        let mut o2 = Options { zip_raw: true, suffix: false, ..Default::default() };
+        let mut o2 = Options { zip_raw: true, suffix: false, include_others: false, ..Default::default() };
         o2.formats[1] = false;
         o2.camera_names.insert("Canon EOS R8".into(), "R8".into());
         let ops = build_ops(&scan, &ev, &o2, Path::new("/dest"));
@@ -1149,30 +1400,63 @@ mod tests {
             Op { src: src.join("a.JPG"), dst: dest.join("2024/x/Cam/JPG/a.JPG"), zip: false, size: 500, tags: vec!["client".into()] },
         ];
         let p = Progress::default();
-        let r = execute(&ops, false, &dest, &p).unwrap();
-        assert_eq!(r.created, 2);
+        // Copy mode: originals stay.
+        let r = execute(&ops, Mode::Copy, false, &src, &dest, &p).unwrap();
+        assert_eq!(r.placed, 2);
         assert!(r.failed.is_empty(), "{:?}", r.failed);
-        assert_eq!(std::fs::read(dest.join("2024/x/Cam/JPG/a.JPG")).unwrap().len(), 500);
+        assert_eq!(std::fs::read(dest.join("2024/x/Cam/JPG/a.JPG")).unwrap(), vec![8u8; 500]);
         let mut z = zip::ZipArchive::new(std::fs::File::open(dest.join("2024/x/Cam/RAW.zip")).unwrap()).unwrap();
         assert_eq!(z.by_index(0).unwrap().size(), 1000);
-        // Second run: nothing new, nothing overwritten.
-        let r2 = execute(&ops, false, &dest, &p).unwrap();
-        assert_eq!(r2.created, 0);
-        assert_eq!(r2.already_there, 2);
-        // Symlink mode: links point at the originals, nothing is copied.
-        #[cfg(unix)]
-        {
-            let dl = root.join("links");
-            let lops = vec![Op { src: src.join("a.JPG"), dst: dl.join("JPG/a.JPG"), zip: false, size: 500, tags: vec![] }];
-            let r = execute(&lops, true, &dl, &p).unwrap();
-            assert_eq!(r.created, 1);
-            assert_eq!(std::fs::read_link(dl.join("JPG/a.JPG")).unwrap(), src.join("a.JPG"));
-        }
-        // Undo removes only what was created, originals stay.
-        let n = undo(&r.manifest.unwrap()).unwrap();
-        assert_eq!(n, 2);
+        assert!(src.join("a.CR3").exists() && src.join("a.JPG").exists());
+        // Re-run: nothing new, nothing overwritten.
+        let r2 = execute(&ops, Mode::Copy, false, &src, &dest, &p).unwrap();
+        assert_eq!((r2.placed, r2.already_there), (0, 2));
+        undo(&r2.manifest.unwrap()).unwrap(); // undoing a no-op run keeps the files
+        assert!(dest.join("2024/x/Cam/JPG/a.JPG").exists());
+        undo(&r.manifest.unwrap()).unwrap();
         assert!(!dest.join("2024").exists());
         assert!(src.join("a.CR3").exists() && src.join("a.JPG").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_verify_link_undo() {
+        let root = std::env::temp_dir().join(format!("insight-mv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("card");
+        std::fs::create_dir_all(src.join("DCIM/100CANON")).unwrap();
+        std::fs::write(src.join("DCIM/100CANON/b.CR3"), vec![3u8; 4000]).unwrap();
+        std::fs::write(src.join("DCIM/100CANON/b.JPG"), vec![4u8; 2000]).unwrap();
+        std::fs::write(src.join("DCIM/100CANON/.DS_Store"), b"x").unwrap();
+        let dest = root.join("Organized");
+        let ops = vec![
+            Op { src: src.join("DCIM/100CANON/b.CR3"), dst: dest.join("2025/e/Cam/RAW.zip"), zip: true, size: 4000, tags: vec![] },
+            Op { src: src.join("DCIM/100CANON/b.JPG"), dst: dest.join("2025/e/Cam/JPG/b_x.JPG"), zip: false, size: 2000, tags: vec![] },
+        ];
+        let p = Progress::default();
+        let r = execute(&ops, Mode::Move, true, &src, &dest, &p).unwrap();
+        assert!(r.failed.is_empty(), "{:?}", r.failed);
+        assert_eq!((r.placed, r.moved), (2, 2));
+        // The JPG now lives in the destination; a link at the old path points to it.
+        let old = src.join("DCIM/100CANON/b.JPG");
+        assert!(std::fs::symlink_metadata(&old).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&old).unwrap(), dest.join("2025/e/Cam/JPG/b_x.JPG"));
+        assert_eq!(std::fs::read(&old).unwrap(), vec![4u8; 2000]);
+        // The zipped RAW has no link (it lives inside the archive) and its original is gone.
+        assert!(!src.join("DCIM/100CANON/b.CR3").exists());
+        // Undo: originals come back byte-identical, destination is cleaned up.
+        undo(&r.manifest.unwrap()).unwrap();
+        assert_eq!(std::fs::read(src.join("DCIM/100CANON/b.CR3")).unwrap(), vec![3u8; 4000]);
+        assert!(std::fs::symlink_metadata(&old).unwrap().is_file());
+        assert_eq!(std::fs::read(&old).unwrap(), vec![4u8; 2000]);
+        assert!(!dest.join("2025").exists());
+        // Move without links: emptied card folders are pruned (but not the card root).
+        let r = execute(&ops, Mode::Move, false, &src, &dest, &p).unwrap();
+        assert_eq!(r.moved, 2);
+        assert!(!src.join("DCIM").exists(), "empty DCIM/100CANON removed");
+        assert!(src.exists());
+        undo(&r.manifest.unwrap()).unwrap();
+        assert!(src.join("DCIM/100CANON/b.JPG").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

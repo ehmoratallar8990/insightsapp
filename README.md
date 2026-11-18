@@ -25,9 +25,9 @@ you search your photos by what's in them, all on your own machine. It keeps itse
 |---|---|
 | ![Organize preview](docs/organize.jpg) | ![Organize options](docs/organize-options.jpg) |
 
-| Photo folder map (Media) | |
+| Planned folders map (Organize) | Photo folder map (Media) |
 |---|---|
-| ![Photo folders](docs/media-folders.jpg) | |
+| ![Planned folders](docs/organize-map.jpg) | ![Photo folders](docs/media-folders.jpg) |
 
 | Media labels | Search photos in plain language |
 |---|---|
@@ -54,7 +54,8 @@ does one job quickly.
   installs them when you quit.
 - **Photo organizer for messy photographers:** point it at a card dump or a chaotic Pictures folder and it
   sorts camera photos into `2025 / 2025-07-14 Wedding / Canon EOS R8 / RAW`, moves blurry shots to `Rejects`,
-  and shows an editable preview first. It copies, never moves, and can undo.
+  and shows an editable preview first. Files are moved only after each copy is verified by content hash, and
+  Undo puts everything back.
 - **Photos by content:** an on-device AI model labels your photos (beach, receipt, screenshot, dog…) and lets you
   search them in plain language (*"mountains reflected in a lake"*).
 - **Private:** nothing is uploaded. Network use is limited to the update check (GitHub), the one-time model
@@ -191,8 +192,8 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 **Organize** (photos, fully on device, free)
 - **Only real camera photos:** a file is organized when its EXIF has a camera make/model and a capture time
   (JPEG, HEIC, PNG/TIFF, and RAW: CR3, CR2, NEF, ARW, RAF, DNG, ORF, RW2…; only the header is read).
-  Screenshots, downloads and exports without camera data are listed and left alone (or copied to
-  `Other images` if you want).
+  Camera **videos** (MP4/MOV, dated from the file header) join their event in a `Videos` folder. Screenshots,
+  downloads and exports without camera data go to `Other images`, or stay put if you switch that off.
 - **Structure:** `Year / YYYY-MM-DD Event / Camera / RAW | JPG | HEIC | Other formats`. Event folders start with
   the date so they sort chronologically. Cameras get readable names (`Canon EOS R8`, `iPhone 15 Pro`,
   `Canon EOS M50 Mark II`) that you can rename.
@@ -210,11 +211,23 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 - **Formats:** pick RAW / JPEG / HEIC / other, keep them in separate folders or together, and optionally pack RAWs
   into one `RAW.zip` per camera and event.
 - **Tags:** for everything and per event, written as Finder tags on macOS (`user.xdg.tags` on Linux).
-- **Symlinks** instead of copies (off by default): no space used; links point at the originals.
-- **Non-destructive:** originals are only read. Copies are written to a temp name and renamed when complete,
-  existing files are never overwritten, and re-running skips what's already there. On the same APFS volume,
-  copies are clones and use almost no extra space. Each run writes a manifest, and **Undo** removes exactly
-  what it created.
+- **Planned folders map:** a zoomable treemap (like the storage map) of exactly what will be created,
+  `Organized › 2025 › 2025-09-12 Lisbon trip › Day 1 › Canon EOS R8 › RAW`. It updates live as you rename,
+  merge or toggle options.
+- **Move, verified (default):** everything ends up in the destination. Each file is copied to a temporary name,
+  fsynced, renamed, read back and compared with the original's content hash (xxh3-128). Only then is the
+  original removed. Zipped RAWs are verified member by member. Folders the move leaves empty are removed.
+  On the same drive, copies are APFS clones, so a move needs **no extra space**. To another drive, each
+  original is freed as soon as its copy verifies.
+- **Links back** (off by default): after a move, a symlink at each original path points to the file's new home,
+  so other apps' old paths keep working.
+- **Copy mode:** the same verified copy, keeping the originals.
+- **Safe by construction:** existing files are never overwritten, re-running skips what's already there, and
+  every run writes a manifest. **Undo** moves each file back to its exact original path (re-verified),
+  removes the links, and deletes only what the run created.
+- **Verified on a real library:** 2,070 files (2,058 Canon R8 / M50 Mark II photos plus 12 videos) moved with links
+  back in 27 s and no change in free space. All 2,070 were byte-identical to the originals, and Undo restored all
+  2,080 files of the card exactly. RAW.zip mode was checked the same way, member by member.
 
 **Media**
 - **Photo folder map:** a zoomable treemap of the folders that hold your photos, weighted by size and showing
@@ -333,6 +346,8 @@ cargo test --release                   # unit tests (walker, index, query engine
 ./target/release/insight --apps                       # installed apps + leftovers
 ./target/release/insight --update-check               # is a newer release available?
 ./target/release/insight --organize-preview ~/Pictures/Card  # photo-organizer plan (read-only)
+./target/release/insight --organize-run <src> <dest> [--copy] [--link-back] [--zip]   # run it
+./target/release/insight --organize-undo <dest>               # put everything back
 ```
 
 - **macOS:** `./scripts/package-macos.sh` produces a universal, ad-hoc signed `dist/Insight.app` and zip.

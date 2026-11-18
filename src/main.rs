@@ -187,11 +187,21 @@ fn tools_cli(cmd: &str, _args: &[String]) {
             let p = organize::Progress::default();
             let mut scan = organize::scan(&src, Some(&dest), &p, true);
             organize::mark_rejects(&mut scan, 0.35);
-            let opts = organize::Options::default();
+            let mut opts = organize::Options::default();
+            opts.zip_raw = _args.iter().any(|a| a == "--zip");
             let events = organize::plan(&scan, &opts, &src, &|_| None);
             let ops = organize::build_ops(&scan, &events, &opts, &dest);
-            match organize::execute(&ops, opts.symlink, &dest, &p) {
-                Ok(r) => println!("created {} · already there {} · failed {} · manifest {:?}", r.created, r.already_there, r.failed.len(), r.manifest),
+            if _args.iter().any(|a| a == "--plan-out") {
+                let list: Vec<String> = ops.iter().map(|o| format!("{}\t{}", o.src.display(), o.dst.display())).collect();
+                let _ = std::fs::write(dest.with_extension("plan.tsv"), list.join("\n"));
+            }
+            let flag = |f: &str| _args.iter().any(|a| a == f);
+            let mode = if flag("--copy") { organize::Mode::Copy } else { organize::Mode::Move };
+            match organize::execute(&ops, mode, flag("--link-back"), &src, &dest, &p) {
+                Ok(r) => println!(
+                    "placed {} · moved {} · linked {} · already there {} · failed {} · emptied dirs {} · manifest {:?}",
+                    r.placed, r.moved, r.linked, r.already_there, r.failed.len(), r.removed_dirs, r.manifest
+                ),
                 Err(e) => println!("error: {e:#}"),
             }
         }

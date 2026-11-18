@@ -33,6 +33,9 @@ pub struct OrganizeUi {
     undo_job: Job<Result<usize, String>>,
     confirm: bool,
     collapsed_years: HashSet<i32>,
+    /// Drill-down path in the planned-folders map.
+    plan_path: Vec<String>,
+    plan_anim: Option<(Rect, f64)>,
     planned_gap: f32,
     shown_at: f64,
 }
@@ -58,6 +61,8 @@ impl OrganizeUi {
             undo_job: Job::default(),
             confirm: false,
             collapsed_years: HashSet::new(),
+            plan_path: Vec::new(),
+            plan_anim: None,
             planned_gap: 6.0,
             shown_at: 0.0,
         }
@@ -137,6 +142,9 @@ impl InsightApp {
                     }
                 }
             }
+            if let Ok(pp) = std::env::var("INSIGHT_ORG_PLAN") {
+                self.organize.plan_path = pp.split('/').map(String::from).collect();
+            }
             if std::env::var("INSIGHT_ORG_REVIEW").is_ok() {
                 if let Some(scan) = &self.organize.scan {
                     for (i, e) in self.organize.events.iter().enumerate() {
@@ -150,7 +158,7 @@ impl InsightApp {
         if let Some(r) = self.organize.run_job.poll() {
             match r {
                 Ok(rep) => {
-                    let msg = format!("Organized {} files", fmt_count(rep.created as u64));
+                    let msg = if rep.moved > 0 { format!("Moved {} files (each copy verified first)", fmt_count(rep.moved as u64)) } else { format!("Organized {} files", fmt_count(rep.placed as u64)) };
                     self.organize.report = Some(rep);
                     self.toast(ui, msg);
                 }
@@ -175,7 +183,7 @@ impl InsightApp {
         theme::debug_scroll(egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("org-scroll")).show(ui, |ui| {
             ui.label(egui::RichText::new("Organize").size(26.0).strong());
             ui.label(
-                egui::RichText::new("Sort camera photos into Year › Event › Camera › Format. Preview and adjust everything first — originals are never moved or changed.")
+                egui::RichText::new("Sort camera media into Year › Event › Camera › Format. Preview and adjust everything first — every file is verified before an original is removed, and Undo puts it all back.")
                     .color(MUTED),
             );
             ui.add_space(14.0);
@@ -251,8 +259,11 @@ impl InsightApp {
                 ui.columns(2, |c| {
                     toggle(&mut c[0], "Separate formats", "RAW / JPG / HEIC subfolders inside each camera", &mut self.organize.opts.split_formats, pal);
                     toggle(&mut c[0], "Zip RAW files", "One RAW.zip per camera per event (stored, not recompressed)", &mut self.organize.opts.zip_raw, pal);
-                    toggle(&mut c[1], "Symlinks instead of copies", "Links point at the originals — uses no space, breaks if originals move", &mut self.organize.opts.symlink, pal);
-                    toggle(&mut c[1], "Also copy non-camera images", "Screenshots, downloads & exports go to “Other images”", &mut self.organize.opts.include_others, pal);
+                    toggle(&mut c[1], "Move into the destination", "Copy → verify (content hash) → remove the original. Off = keep originals (copy)", &mut self.organize.opts.move_files, pal);
+                    if self.organize.opts.move_files {
+                        toggle(&mut c[1], "Leave links at the old locations", "A symlink at each original path points to its new home (zipped RAWs excluded)", &mut self.organize.opts.link_back, pal);
+                    }
+                    toggle(&mut c[1], "Include non-camera images", "Screenshots, downloads & exports go to “Other images”", &mut self.organize.opts.include_others, pal);
                     toggle(&mut c[0], "Descriptive file names", "IMG_0412.CR3 → IMG_0412_beach.CR3 (content label, else event name)", &mut self.organize.opts.suffix, pal);
                     let before = self.organize.opts.split_days;
                     toggle(&mut c[1], "Split multi-day events into days", "Trip to Europe / Day 1 - 2025-07-14, Day 2 - …", &mut self.organize.opts.split_days, pal);
@@ -314,7 +325,7 @@ impl InsightApp {
                             "1.  Insight reads each file's camera make, model and capture time (JPEG, HEIC, CR3, CR2, NEF, ARW, RAF, DNG…).",
                             "2.  Photos are grouped into events by time; screenshots and downloads without camera data are left alone.",
                             "3.  You rename events, merge them, add tags, rename cameras and pick formats in the preview.",
-                            "4.  Organize copies (or links) into  2025 / 2025-07-14 Wedding / Canon EOS R8 / RAW. Undo removes only what it created.",
+                            "4.  Organize moves (copy → verify → remove) or copies into  2025 / 2025-07-14 Wedding / Canon EOS R8 / RAW. Undo restores everything.",
                         ] {
                             ui.label(egui::RichText::new(l).color(MUTED));
                         }
@@ -348,7 +359,7 @@ impl InsightApp {
             ("📷", fmt_count(scan.photos.len() as u64), "camera photos".to_string(), pal.accent),
             ("📅", fmt_count(o.events.len() as u64), "events".to_string(), pal.accent2),
             ("🎞", fmt_count(cams.len() as u64), if cams.len() == 1 { "camera".into() } else { "cameras".into() }, GREEN),
-            ("🖼", fmt_count(scan.others.len() as u64), format!("not from a camera · {} (left alone)", human(other_bytes)), AMBER),
+            ("🖼", fmt_count(scan.others.len() as u64), format!("not from a camera · {} → {}", human(other_bytes), if o.opts.include_others { "Other images" } else { "left alone" }), AMBER),
             ("🗑", fmt_count(if o.opts.rejects { scan.photos.iter().filter(|p| p.reject).count() } else { 0 } as u64), "rejects (blurry / exposure)".to_string(), RED),
         ];
         ui.columns(5, |cols| {
@@ -369,6 +380,10 @@ impl InsightApp {
                 });
             }
         });
+        ui.add_space(14.0);
+
+        // ---------- Planned folders map ----------
+        self.plan_map(ui, &ops, now);
         ui.add_space(14.0);
 
         // ---------- Cameras ----------
@@ -583,7 +598,7 @@ impl InsightApp {
             if running {
                 let (d, t) = (self.organize.progress.done.load(Ordering::Relaxed), self.organize.progress.total.load(Ordering::Relaxed));
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("Organizing · {} / {} files · {}", fmt_count(d), fmt_count(t), human(self.organize.progress.bytes.load(Ordering::Relaxed)))).size(14.0));
+                    ui.label(egui::RichText::new(format!("{} · {} / {} files · {}", if self.organize.opts.move_files { "Moving (copy → verify → remove)" } else { "Copying & verifying" }, fmt_count(d), fmt_count(t), human(self.organize.progress.bytes.load(Ordering::Relaxed)))).size(14.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::ghost_button(ui, "Stop").clicked() {
                             self.organize.progress.cancel.store(true, Ordering::Relaxed);
@@ -597,8 +612,15 @@ impl InsightApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("✔").size(18.0).color(GREEN));
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(format!("Organized {} files", fmt_count(r.created as u64))).size(16.0).strong());
-                        let mut bits = vec![human(r.bytes)];
+                        let head = if r.moved > 0 { format!("Moved {} files into the destination", fmt_count(r.moved as u64)) } else { format!("Copied {} files", fmt_count(r.placed as u64)) };
+                        ui.label(egui::RichText::new(head).size(16.0).strong());
+                        let mut bits = vec![human(r.bytes), "every copy verified by content hash".to_string()];
+                        if r.linked > 0 {
+                            bits.push(format!("{} links left at the old locations", fmt_count(r.linked as u64)));
+                        }
+                        if r.removed_dirs > 0 {
+                            bits.push(format!("{} emptied folders removed", r.removed_dirs));
+                        }
                         if r.already_there > 0 {
                             bits.push(format!("{} already there (skipped)", fmt_count(r.already_there as u64)));
                         }
@@ -612,7 +634,7 @@ impl InsightApp {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(m) = r.manifest.clone() {
-                            if theme::ghost_button(ui, "↶ Undo").on_hover_text("Delete only the files this run created").clicked() {
+                            if theme::ghost_button(ui, "↶ Undo").on_hover_text("Put every file back where it was (verified), remove links and copies this run made").clicked() {
                                 self.organize.undo_job.start(ui.ctx(), move || organize::undo(&m).map_err(|e| e.to_string()));
                             }
                         }
@@ -624,16 +646,20 @@ impl InsightApp {
                 return;
             }
             let free = free_space(self.organize.dest.trim());
-            let needs = if self.organize.opts.symlink { 0 } else { bytes };
+            let src_root = PathBuf::from(self.organize.scanned.0.trim());
+            let same_drive_free = organize::free_move(&src_root, Path::new(self.organize.dest.trim()));
+            let moving = self.organize.opts.move_files;
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    let verb = if self.organize.opts.symlink { "link" } else { "copy" };
+                    let verb = if moving { "move" } else { "copy" };
                     ui.label(egui::RichText::new(format!("Ready to {verb} {} files · {}", fmt_count(ops.len() as u64), human(bytes))).size(16.0).strong());
                     ui.label(egui::RichText::new(format!("into {}", shorten_home(self.organize.dest.trim()))).size(12.5).color(MUTED));
-                    let note = match free {
-                        Some(f) if needs > f => (format!("⚠ Only {} free on the destination — copies on the same APFS volume are clones and use little space; elsewhere this won't fit.", human(f)), AMBER),
-                        _ if self.organize.opts.symlink => ("Links use no space; keep the originals where they are.".to_string(), FAINT),
-                        _ => ("Same APFS volume: copies are instant clones that share storage with the originals.".to_string(), FAINT),
+                    let note = match (moving, same_drive_free, free) {
+                        (_, true, _) if moving => ("Same drive: each file is cloned, verified, then the original is removed — no extra space needed.".to_string(), GREEN),
+                        (_, true, _) => ("Same drive: copies are clones that share storage with the originals until either is edited.".to_string(), FAINT),
+                        (_, false, Some(f)) if bytes > f => (format!("⚠ Only {} free on the destination drive; {} needed.", human(f), human(bytes)), AMBER),
+                        (true, false, _) => (format!("Other drive: needs {} there; each original is removed right after its copy verifies.", human(bytes)), FAINT),
+                        _ => (format!("Needs {} on the destination drive.", human(bytes)), FAINT),
                     };
                     ui.label(egui::RichText::new(note.0).size(11.5).color(note.1));
                 });
@@ -669,21 +695,27 @@ impl InsightApp {
                 ui.set_max_width(480.0);
                 ui.label(egui::RichText::new("Organize photos?").size(18.0).strong());
                 ui.add_space(6.0);
-                let verb = if self.organize.opts.symlink { "linked" } else { "copied" };
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} files will be {verb} into {}. Your originals are not moved or changed, existing files are never overwritten, and Undo removes exactly what this run creates.",
+                let text = if self.organize.opts.move_files {
+                    format!(
+                        "{} files will be moved into {}. Each one is copied, read back and checked against the original's content hash; only then is the original removed{}. Existing files are never overwritten, and Undo puts everything back where it was.",
+                        fmt_count(ops.len() as u64),
+                        shorten_home(&dest.to_string_lossy()),
+                        if self.organize.opts.link_back { " and a link left in its place" } else { "" }
+                    )
+                } else {
+                    format!(
+                        "{} files will be copied into {} and verified. Originals stay where they are; existing files are never overwritten, and Undo removes exactly what this run creates.",
                         fmt_count(ops.len() as u64),
                         shorten_home(&dest.to_string_lossy())
-                    ))
-                    .color(MUTED),
-                );
+                    )
+                };
+                ui.label(egui::RichText::new(text).color(MUTED));
                 if self.organize.opts.zip_raw {
                     ui.label(egui::RichText::new("RAW files will be packed into RAW.zip per camera and event.").size(12.5).color(FAINT));
                 }
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
-                    if theme::primary_button(ui, "Organize", self.pal).clicked() {
+                    if theme::primary_button(ui, if self.organize.opts.move_files { "Move & organize" } else { "Copy & organize" }, self.pal).clicked() {
                         go = true;
                     }
                     if theme::ghost_button(ui, "Cancel").clicked() {
@@ -695,8 +727,10 @@ impl InsightApp {
             self.organize.confirm = false;
             self.organize.progress = Arc::new(Progress::default());
             let prog = self.organize.progress.clone();
-            let symlink = self.organize.opts.symlink;
-            self.organize.run_job.start(ui.ctx(), move || organize::execute(&ops, symlink, &dest, &prog).map_err(|e| format!("{e:#}")));
+            let mode = if self.organize.opts.move_files { organize::Mode::Move } else { organize::Mode::Copy };
+            let link_back = self.organize.opts.link_back;
+            let src_root = PathBuf::from(self.organize.scanned.0.trim());
+            self.organize.run_job.start(ui.ctx(), move || organize::execute(&ops, mode, link_back, &src_root, &dest, &prog).map_err(|e| format!("{e:#}")));
         } else if close || modal.should_close() {
             self.organize.confirm = false;
         }
@@ -723,4 +757,185 @@ fn toggle(ui: &mut Ui, title: &str, sub: &str, value: &mut bool, pal: Palette) {
         });
     });
     ui.add_space(4.0);
+}
+
+
+/// The folder tree the plan will create (sizes + file counts), for the map.
+#[derive(Default)]
+struct PlanNode {
+    bytes: u64,
+    files: usize,
+    kids: BTreeMap<String, PlanNode>,
+}
+
+impl PlanNode {
+    fn build(ops: &[organize::Op], dest: &Path) -> PlanNode {
+        let mut root = PlanNode::default();
+        for op in ops {
+            let Ok(rel) = op.dst.strip_prefix(dest) else { continue };
+            // Folders only: the file (or RAW.zip member) itself is aggregated.
+            let comps: Vec<String> = rel.parent().map(|p| p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+            let mut n = &mut root;
+            n.bytes += op.size;
+            n.files += 1;
+            for c in comps {
+                n = n.kids.entry(c).or_default();
+                n.bytes += op.size;
+                n.files += 1;
+            }
+            if op.zip {
+                let z = n.kids.entry("RAW.zip".into()).or_default();
+                z.bytes += op.size;
+                z.files += 1;
+            }
+        }
+        root
+    }
+}
+
+impl InsightApp {
+    /// Zoomable treemap of the destination structure (like Storage's space map).
+    fn plan_map(&mut self, ui: &mut Ui, ops: &[organize::Op], now: f64) {
+        let pal = self.pal;
+        let dest = PathBuf::from(self.organize.dest.trim());
+        let root = PlanNode::build(ops, &dest);
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // Resolve the drill-down path (names may change as events are renamed).
+            let mut node = &root;
+            let mut depth = 0;
+            for name in &self.organize.plan_path {
+                match node.kids.get(name) {
+                    Some(k) => {
+                        node = k;
+                        depth += 1;
+                    }
+                    None => break,
+                }
+            }
+            self.organize.plan_path.truncate(depth);
+            let mut go: Option<usize> = None;
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(4.0, 18.0), Sense::hover());
+                ui.painter().rect_filled(r, CornerRadius::same(2), pal.accent);
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Planned folders").size(16.0).strong());
+                ui.add_space(10.0);
+                let root_name = dest.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Destination".into());
+                let mut crumbs = vec![root_name];
+                crumbs.extend(self.organize.plan_path.iter().cloned());
+                let n = crumbs.len();
+                for (j, c) in crumbs.into_iter().enumerate() {
+                    let last = j + 1 == n;
+                    if ui.add(egui::Label::new(egui::RichText::new(c).size(13.0).color(if last { TEXT } else { MUTED })).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        go = Some(j);
+                    }
+                    if !last {
+                        ui.label(egui::RichText::new("›").color(FAINT));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(format!("{} files · {}", fmt_count(node.files as u64), human(node.bytes))).size(12.5).color(pal.accent2));
+                });
+            });
+            ui.label(egui::RichText::new("What Organize will create — click a folder to zoom in, use the breadcrumbs to go back. Updates live as you edit.").size(11.5).color(FAINT));
+            ui.add_space(6.0);
+            let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), 260.0), Sense::hover());
+            let names: Vec<(&String, &PlanNode)> = node.kids.iter().collect();
+            let mut items: Vec<(u32, u64)> = names.iter().enumerate().map(|(i, (_, k))| (i as u32, k.bytes.max(1))).collect();
+            items.sort_by(|a, b| b.1.cmp(&a.1));
+            let in_kids: usize = node.kids.values().map(|k| k.files).sum();
+            let loose = node.files.saturating_sub(in_kids);
+            if loose > 0 {
+                let loose_bytes = node.bytes.saturating_sub(node.kids.values().map(|k| k.bytes).sum());
+                items.push((crate::index::NONE, loose_bytes.max(1)));
+            }
+            let tiles = super::storage_view::squarify(&items, area.shrink(1.0));
+            let (t_anim, from) = match self.organize.plan_anim {
+                Some((r, start)) => {
+                    let t = ease_out_cubic(((now - start) / 0.4) as f32);
+                    if t >= 1.0 {
+                        self.organize.plan_anim = None;
+                    } else {
+                        ui.ctx().request_repaint();
+                    }
+                    (t, Some(r))
+                }
+                None => (1.0, None),
+            };
+            let map = |r: Rect| match from {
+                Some(f) => {
+                    let a = (r.min - area.min) / area.size();
+                    let b = (r.max - area.min) / area.size();
+                    super::storage_view::lerp_rect(Rect::from_min_max(f.min + a * f.size(), f.min + b * f.size()), r, t_anim)
+                }
+                None => r,
+            };
+            let p = ui.painter().with_clip_rect(area);
+            p.rect_filled(area, CornerRadius::same(10), SURFACE2);
+            const TONES: [Color32; 6] = [
+                Color32::from_rgb(124, 92, 255),
+                Color32::from_rgb(56, 140, 255),
+                Color32::from_rgb(20, 184, 166),
+                Color32::from_rgb(236, 72, 153),
+                Color32::from_rgb(245, 158, 11),
+                Color32::from_rgb(99, 102, 241),
+            ];
+            let mut drill: Option<(String, Rect)> = None;
+            for (i, t) in tiles.iter().enumerate() {
+                let r = map(t.rect).shrink(1.5);
+                if r.width() < 1.0 || r.height() < 1.0 {
+                    continue;
+                }
+                let (name, files, has_kids, base) = if t.id == crate::index::NONE {
+                    ("Files".to_string(), loose, false, kind_color(crate::filetype::Kind::Image))
+                } else {
+                    let (n, k) = names[t.id as usize];
+                    let base = match n.as_str() {
+                        "Rejects" => RED,
+                        "RAW" | "RAW.zip" => Color32::from_rgb(245, 158, 11),
+                        "JPG" => Color32::from_rgb(56, 140, 255),
+                        "HEIC" => Color32::from_rgb(20, 184, 166),
+                        _ => lerp_color(TONES[i % TONES.len()], pal.accent, 0.15),
+                    };
+                    (n.clone(), k.files, !k.kids.is_empty(), base)
+                };
+                let resp = ui.interact(t.rect, Id::unique(("plan-tile", depth, i)), Sense::click());
+                let h = ui.ctx().animate_bool_with_time(Id::unique(("plan-h", depth, name.as_str())), resp.hovered(), 0.12);
+                p.rect_filled(r, CornerRadius::same(6), lerp_color(with_alpha(base, 0.5), with_alpha(base, 0.85), h));
+                p.rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, with_alpha(Color32::WHITE, 0.08 + 0.25 * h)), StrokeKind::Inside);
+                if r.width() > 56.0 && r.height() > 26.0 && t_anim > 0.6 {
+                    let mut job = egui::text::LayoutJob::single_section(name.clone(), egui::TextFormat::simple(FontId::proportional(12.5), Color32::WHITE));
+                    job.wrap = egui::text::TextWrapping { max_width: r.width() - 12.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+                    let g = ui.painter().layout_job(job);
+                    p.galley(r.min + vec2(6.0, 5.0), g, Color32::WHITE);
+                    if r.height() > 42.0 {
+                        p.text(r.min + vec2(6.0, 22.0), Align2::LEFT_TOP, format!("{} files · {}", fmt_count(files as u64), human(t.size)), FontId::proportional(11.0), with_alpha(Color32::WHITE, 0.75));
+                    }
+                    if has_kids && r.height() > 42.0 {
+                        p.text(r.right_top() + vec2(-8.0, 6.0), Align2::RIGHT_TOP, "📁", FontId::proportional(11.0), with_alpha(Color32::WHITE, 0.6));
+                    }
+                }
+                if resp.hovered() {
+                    egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), Id::unique("plan-tip"), egui::PopupAnchor::Pointer).show(|ui| {
+                        ui.label(format!("{name}\n{} files · {}{}", fmt_count(files as u64), human(t.size), if has_kids { "\nclick to open" } else { "" }));
+                    });
+                }
+                if resp.clicked() && has_kids {
+                    drill = Some((name, t.rect));
+                }
+            }
+            if tiles.is_empty() {
+                ui.painter().text(area.center(), Align2::CENTER_CENTER, "Nothing selected to organize", FontId::proportional(14.0), FAINT);
+            }
+            if let Some((name, r)) = drill {
+                self.organize.plan_path.push(name);
+                self.organize.plan_anim = Some((r, now));
+            }
+            if let Some(j) = go {
+                self.organize.plan_path.truncate(j);
+                self.organize.plan_anim = Some((area.shrink(area.width().min(area.height()) * 0.25), now));
+            }
+        });
+    }
 }
