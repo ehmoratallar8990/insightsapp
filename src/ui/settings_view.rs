@@ -26,7 +26,7 @@ impl InsightApp {
                         ui.label(egui::RichText::new("💽").size(14.0));
                         ui.label(egui::RichText::new(r).size(13.5));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if self.settings.roots.len() > 1 && ui.small_button("✕").clicked() {
+                            if self.settings.roots.len() > 1 && ui.small_button("✖").clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -52,7 +52,7 @@ impl InsightApp {
                         ui.label(egui::RichText::new("⊘").color(FAINT));
                         ui.label(egui::RichText::new(r).size(13.0).color(MUTED));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button("✖").clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -158,6 +158,63 @@ impl InsightApp {
                         }
                     }
                 });
+            });
+            ui.add_space(14.0);
+
+            // ---- Updates ----
+            theme::card().show(ui, |ui| {
+                use crate::update::State;
+                ui.set_width(ui.available_width());
+                theme::section_title(ui, "Updates", pal);
+                let st = self.updater.get();
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(format!("Insight {}", crate::update::CURRENT)).size(15.0).strong());
+                        let (txt, col) = match &st {
+                            State::Idle => ("Not checked yet".to_string(), MUTED),
+                            State::Checking => ("Checking GitHub for a new release…".to_string(), MUTED),
+                            State::UpToDate => ("You're on the latest version".to_string(), GREEN),
+                            State::Available(r) => (format!("Version {} is available", r.version), pal.accent2),
+                            State::Downloading(r, f) => (format!("Downloading {} · {:.0}%", r.version, f * 100.0), pal.accent2),
+                            State::Ready(r, _) => (format!("Version {} downloaded and verified (SHA-256)", r.version), GREEN),
+                            State::Installing => ("Installing…".to_string(), MUTED),
+                            State::Failed(e) => (format!("Update failed: {e}"), RED),
+                        };
+                        ui.add(egui::Label::new(egui::RichText::new(txt).size(12.5).color(col)).wrap());
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match &st {
+                        State::Checking | State::Downloading(..) | State::Installing => theme::spinner(ui, 20.0, pal.accent2),
+                        State::Available(_) => {
+                            if theme::primary_button(ui, "Download", pal).clicked() {
+                                self.updater.download();
+                            }
+                        }
+                        State::Ready(..) => {
+                            if theme::primary_button(ui, "Restart & update", pal).clicked() {
+                                if let Err(e) = self.updater.apply(true) {
+                                    self.toast(ui, format!("Update failed: {e:#}"));
+                                }
+                            }
+                        }
+                        _ => {
+                            if theme::ghost_button(ui, "Check now").clicked() {
+                                self.updater.check(self.settings.auto_update);
+                            }
+                        }
+                    });
+                });
+                if let State::Ready(r, _) | State::Available(r) = &st {
+                    if !r.notes.trim().is_empty() {
+                        ui.add_space(6.0);
+                        egui::CollapsingHeader::new(egui::RichText::new("What's new").size(12.5)).id_salt("notes").show(ui, |ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(r.notes.trim()).size(12.0).color(MUTED)).wrap());
+                        });
+                    }
+                }
+                ui.add_space(8.0);
+                toggle_row(ui, "Update automatically", "Check GitHub releases at launch and every 6 hours, download in the background", &mut self.settings.auto_update, pal);
+                toggle_row(ui, "Install when I quit", "A downloaded update is swapped in when Insight closes — no prompts", &mut self.settings.install_on_quit, pal);
+                ui.label(egui::RichText::new("Updates are verified against the release's SHA-256 checksums before anything is replaced.").size(11.5).color(FAINT));
             });
             ui.add_space(14.0);
 

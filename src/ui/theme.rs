@@ -385,3 +385,143 @@ pub fn appear(ui: &mut Ui, started: f64, delay: f64) -> f32 {
     }
     ease_out_cubic(t)
 }
+
+/// Animated checkbox. Returns true when toggled.
+pub fn check(ui: &mut Ui, on: &mut bool, color: Color32, id: egui::Id) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+    let t = ui.ctx().animate_bool_with_time(id.with("chk"), *on, 0.16);
+    let hov = ui.ctx().animate_bool_with_time(id.with("chk-h"), resp.hovered(), 0.1);
+    let r = rect.shrink(1.0);
+    let p = ui.painter();
+    p.rect(r, CornerRadius::same(6), lerp_color(lerp_color(SURFACE2, SURFACE3, hov), color, t), Stroke::new(1.0, lerp_color(lerp_color(BORDER, FAINT, hov), color, t)), StrokeKind::Inside);
+    if t > 0.01 {
+        let c = r.center();
+        let pts = [c + vec2(-4.5, 0.2), c + vec2(-1.3, 3.4), c + vec2(4.8, -3.6)];
+        // Draw the tick progressively.
+        let seg1 = (t * 2.0).min(1.0);
+        let seg2 = (t * 2.0 - 1.0).clamp(0.0, 1.0);
+        let s = Stroke::new(2.0, Color32::WHITE);
+        p.line_segment([pts[0], pts[0] + (pts[1] - pts[0]) * seg1], s);
+        if seg2 > 0.0 {
+            p.line_segment([pts[1], pts[1] + (pts[2] - pts[1]) * seg2], s);
+        }
+    }
+    let clicked = resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+    if clicked {
+        *on = !*on;
+    }
+    clicked
+}
+
+/// Segmented control with a sliding highlight. Returns the selected index.
+pub fn segmented(ui: &mut Ui, labels: &[&str], selected: usize, pal: Palette, id: egui::Id) -> usize {
+    let font = FontId::proportional(13.5);
+    let galleys: Vec<_> = labels.iter().map(|l| ui.painter().layout_no_wrap(l.to_string(), font.clone(), TEXT)).collect();
+    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 34.0).collect();
+    let total: f32 = widths.iter().sum::<f32>() + 8.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(total, 38.0), Sense::hover());
+    let p = ui.painter().clone();
+    p.rect(rect, CornerRadius::same(12), SURFACE, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+    let mut x = rect.left() + 4.0;
+    let mut cells = Vec::new();
+    for w in &widths {
+        cells.push(Rect::from_min_size(pos2(x, rect.top() + 4.0), vec2(*w, rect.height() - 8.0)));
+        x += w;
+    }
+    let target = cells[selected.min(cells.len() - 1)];
+    let lx = ui.ctx().animate_value_with_time(id.with("seg-l"), target.left(), 0.22);
+    let rx = ui.ctx().animate_value_with_time(id.with("seg-r"), target.right(), 0.22);
+    let pill = Rect::from_min_max(pos2(lx, target.top()), pos2(rx, target.bottom()));
+    glow(&p, pill.translate(vec2(0.0, 3.0)), 9, with_alpha(pal.accent, 0.25), 12.0);
+    gradient_fill(ui.ctx(), &p, pill, CornerRadius::same(9), with_alpha(pal.accent, 0.9), with_alpha(pal.accent2, 0.9));
+    let mut out = selected;
+    for (i, (cell, g)) in cells.iter().zip(galleys).enumerate() {
+        let resp = ui.interact(*cell, id.with(("seg", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let hov = ui.ctx().animate_bool_with_time(id.with(("seg-h", i)), resp.hovered(), 0.12);
+        let col = if i == selected { Color32::WHITE } else { lerp_color(MUTED, TEXT, hov) };
+        p.galley(cell.center() - g.size() / 2.0, g, col);
+        if resp.clicked() {
+            out = i;
+        }
+    }
+    out
+}
+
+/// Area sparkline of recent samples.
+pub fn sparkline(p: &egui::Painter, rect: Rect, data: &std::collections::VecDeque<f32>, max: f32, color: Color32) {
+    if data.len() < 2 {
+        return;
+    }
+    let max = max.max(data.iter().cloned().fold(0.0, f32::max)).max(1e-3);
+    let n = crate::health::HISTORY.max(data.len());
+    let step = rect.width() / (n - 1) as f32;
+    let x0 = rect.right() - step * (data.len() - 1) as f32;
+    let pts: Vec<Pos2> = data.iter().enumerate().map(|(i, v)| pos2(x0 + i as f32 * step, rect.bottom() - (v / max).clamp(0.0, 1.0) * rect.height())).collect();
+    // Filled area as vertical quads with a fading alpha.
+    let mut mesh = Mesh::default();
+    for w in pts.windows(2) {
+        let i = mesh.vertices.len() as u32;
+        let uv = egui::epaint::WHITE_UV;
+        let top = with_alpha(color, 0.28);
+        let bot = with_alpha(color, 0.0);
+        mesh.vertices.push(Vertex { pos: w[0], uv, color: top });
+        mesh.vertices.push(Vertex { pos: w[1], uv, color: top });
+        mesh.vertices.push(Vertex { pos: pos2(w[1].x, rect.bottom()), uv, color: bot });
+        mesh.vertices.push(Vertex { pos: pos2(w[0].x, rect.bottom()), uv, color: bot });
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i, i + 2, i + 3);
+    }
+    p.add(mesh);
+    p.add(egui::Shape::line(pts.clone(), Stroke::new(1.6, color)));
+    if let Some(last) = pts.last() {
+        p.circle_filled(*last, 3.0, color);
+        p.circle_filled(*last, 6.0, with_alpha(color, 0.25));
+    }
+}
+
+/// A thick progress ring with a gradient, centred at `c`.
+pub fn ring(p: &egui::Painter, c: Pos2, r: f32, w: f32, frac: f32, a: Color32, b: Color32) {
+    let n = 120;
+    let pts = |from: f32, to: f32| -> Vec<Pos2> {
+        let steps = ((to - from) * n as f32).ceil().max(1.0) as usize;
+        (0..=steps)
+            .map(|i| {
+                let ang = -std::f32::consts::FRAC_PI_2 + (from + (to - from) * i as f32 / steps as f32) * std::f32::consts::TAU;
+                c + vec2(ang.cos(), ang.sin()) * r
+            })
+            .collect()
+    };
+    p.add(egui::Shape::line(pts(0.0, 1.0), Stroke::new(w, with_alpha(Color32::WHITE, 0.08))));
+    let f = frac.clamp(0.0, 1.0);
+    if f > 0.002 {
+        let points = pts(0.0, f);
+        let len = points.len();
+        for i in 0..len.saturating_sub(1) {
+            p.line_segment([points[i], points[i + 1]], Stroke::new(w, lerp_color(a, b, i as f32 / len as f32)));
+        }
+        p.circle_filled(points[0], w / 2.0, a);
+        p.circle_filled(points[len - 1], w / 2.0, b);
+    }
+}
+
+/// Small rotating arc spinner.
+pub fn spinner(ui: &mut Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let t = ui.input(|i| i.time) as f32;
+    let c = rect.center();
+    let r = size / 2.0 - 2.0;
+    let start = t * 5.0;
+    let pts: Vec<Pos2> = (0..=24).map(|i| {
+        let a = start + i as f32 / 24.0 * 4.2;
+        c + vec2(a.cos(), a.sin()) * r
+    }).collect();
+    ui.painter().add(egui::Shape::line(pts, Stroke::new(2.2, color)));
+    ui.ctx().request_repaint();
+}
+
+/// Paint a card background at `rect` and run `add` inside it.
+pub fn card_at<R>(ui: &mut Ui, rect: Rect, id: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.painter().rect(rect, CornerRadius::same(16), SURFACE, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(16.0)).id_salt(id).layout(egui::Layout::top_down(egui::Align::Min)));
+    add(&mut child)
+}

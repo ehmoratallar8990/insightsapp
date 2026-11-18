@@ -17,16 +17,20 @@ use std::sync::atomic::Ordering;
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub enum Page {
     Search,
+    Health,
     Storage,
+    Cleanup,
     Media,
     Settings,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::Search, Page::Storage, Page::Media, Page::Settings];
+    pub const ALL: [Page; 6] = [Page::Search, Page::Health, Page::Storage, Page::Cleanup, Page::Media, Page::Settings];
     fn label(self) -> &'static str {
         match self {
             Page::Search => "Search",
+            Page::Health => "Health",
+            Page::Cleanup => "Cleanup",
             Page::Storage => "Storage",
             Page::Media => "Media",
             Page::Settings => "Settings",
@@ -35,6 +39,8 @@ impl Page {
     fn icon(self) -> &'static str {
         match self {
             Page::Search => "🔍",
+            Page::Health => "💓",
+            Page::Cleanup => "✨",
             Page::Storage => "📊",
             Page::Media => "🖼",
             Page::Settings => "⚙",
@@ -53,6 +59,10 @@ pub struct Settings {
     pub media_scope: String,
     pub dup_scope: String,
     pub dup_min_mb: f32,
+    /// Check GitHub for new releases and download them in the background.
+    pub auto_update: bool,
+    /// Swap a downloaded update in when Insight quits.
+    pub install_on_quit: bool,
 }
 
 impl Default for Settings {
@@ -67,6 +77,8 @@ impl Default for Settings {
             media_scope: home.clone(),
             dup_scope: home,
             dup_min_mb: 1.0,
+            auto_update: true,
+            install_on_quit: true,
         }
     }
 }
@@ -128,6 +140,20 @@ pub struct InsightApp {
     // Overlays
     pub confirm_trash: Option<Vec<String>>,
     pub toast: Option<(String, f64)>,
+
+    // Health / cleanup / updates
+    pub monitor: crate::health::Monitor,
+    pub cleanup: super::cleanup_view::CleanupUi,
+    pub mem_job: super::cleanup_view::Job<()>,
+    /// Messages from background threads, shown as toasts.
+    pub bg_msgs: Arc<parking_lot::Mutex<Vec<String>>>,
+    pub updater: crate::update::Updater,
+
+    // Search tree ("group by app")
+    pub group_by_app: bool,
+    pub tree: Option<super::search_view::TreeCache>,
+    pub tree_open: std::collections::HashSet<String>,
+    pub tree_rows: Vec<super::search_view::TreeRow>,
 }
 
 impl InsightApp {
@@ -200,6 +226,15 @@ impl InsightApp {
             new_exclude: String::new(),
             confirm_trash: None,
             toast: None,
+            monitor: crate::health::Monitor::start(cc.egui_ctx.clone()),
+            cleanup: Default::default(),
+            mem_job: Default::default(),
+            bg_msgs: Default::default(),
+            updater: crate::update::Updater::new(cc.egui_ctx.clone()),
+            group_by_app: false,
+            tree: None,
+            tree_open: Default::default(),
+            tree_rows: Vec::new(),
         }
     }
 
@@ -337,6 +372,9 @@ impl InsightApp {
         }
         ui.add_space(Page::ALL.len() as f32 * (item_h + 4.0));
 
+        // Update banner.
+        self.update_banner(ui, left, right);
+
         // Bottom: disk usage mini-card.
         let disks = self.report.as_ref().map(|r| r.disks.clone()).unwrap_or_else(|| cached_disks(ui.ctx()));
         if let Some(d) = disks.first() {
@@ -367,6 +405,48 @@ impl InsightApp {
                 FontId::proportional(11.0),
                 MUTED,
             );
+        }
+    }
+
+    fn update_banner(&mut self, ui: &mut Ui, left: f32, right: f32) {
+        use crate::update::State;
+        let pal = self.pal;
+        let st = self.updater.get();
+        let (title, sub, frac) = match &st {
+            State::Available(r) => (format!("Update {} available", r.version), "Click to download".to_string(), None),
+            State::Downloading(r, f) => (format!("Downloading {}", r.version), format!("{:.0}%", f * 100.0), Some(*f)),
+            State::Ready(r, _) => (format!("Insight {} is ready", r.version), "Click to restart & update".to_string(), Some(1.0)),
+            State::Installing => ("Installing update…".to_string(), String::new(), None),
+            _ => return,
+        };
+        let bottom = ui.max_rect().bottom() - 16.0 - 74.0 - 10.0;
+        let r = Rect::from_min_max(pos2(left, bottom - 62.0), pos2(right, bottom));
+        let resp = ui.interact(r, Id::unique("update-banner"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let hov = ui.ctx().animate_bool_with_time(Id::unique("upd-h"), resp.hovered(), 0.12);
+        let t = ui.input(|i| i.time) as f32;
+        let p = ui.painter();
+        theme::glow(p, r.translate(vec2(0.0, 4.0)), 12, with_alpha(pal.accent, 0.25 + 0.15 * (t * 2.0).sin().abs()), 16.0);
+        theme::gradient_fill(ui.ctx(), p, r, CornerRadius::same(12), lerp_color(SURFACE2, pal.accent, 0.45 + 0.1 * hov), lerp_color(SURFACE2, pal.accent2, 0.35 + 0.1 * hov));
+        p.text(pos2(r.left() + 12.0, r.top() + 18.0), Align2::LEFT_CENTER, format!("✨ {title}"), FontId::proportional(12.5), TEXT);
+        p.text(pos2(r.left() + 12.0, r.top() + 38.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.0), with_alpha(TEXT, 0.75));
+        if let Some(f) = frac {
+            let bar = Rect::from_min_size(pos2(r.left() + 12.0, r.bottom() - 10.0), vec2(r.width() - 24.0, 3.0));
+            p.rect_filled(bar, CornerRadius::same(2), with_alpha(Color32::WHITE, 0.15));
+            p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), CornerRadius::same(2), Color32::WHITE);
+        }
+        if matches!(st, State::Downloading(..) | State::Installing) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if resp.clicked() {
+            match st {
+                State::Available(_) => self.updater.download(),
+                State::Ready(..) => {
+                    if let Err(e) = self.updater.apply(true) {
+                        self.toast(ui, format!("Update failed: {e:#}"));
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -416,7 +496,7 @@ impl InsightApp {
     fn global_shortcuts(&mut self, ui: &mut Ui) {
         let (cmd, keys) = ui.input(|i| {
             let mut k = Vec::new();
-            for (n, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4].iter().enumerate() {
+            for (n, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6].iter().enumerate() {
                 if i.key_pressed(*key) {
                     k.push(n);
                 }
@@ -603,6 +683,11 @@ impl eframe::App for InsightApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.settings.install_on_quit && matches!(self.updater.get(), crate::update::State::Ready(..)) {
+            if let Err(e) = self.updater.apply(false) {
+                log::warn!("update on quit failed: {e:#}");
+            }
+        }
         self.engine.save();
         self.media.cancel();
         self.media.store.read().save();
@@ -614,6 +699,13 @@ impl eframe::App for InsightApp {
         self.pump_results(now);
         self.pump_search();
         self.global_shortcuts(ui);
+        self.monitor.set_active(self.page == Page::Health);
+        self.updater.tick(self.settings.auto_update && std::env::var("INSIGHT_SHOT").is_err(), now - self.started_at);
+        let msgs: Vec<String> = std::mem::take(&mut *self.bg_msgs.lock());
+        if let Some(m) = msgs.into_iter().last() {
+            self.toast(ui, m);
+        }
+        let _ = self.mem_job.poll();
 
         egui::Panel::left("sidebar")
             .resizable(false)
@@ -646,6 +738,8 @@ impl eframe::App for InsightApp {
             child.multiply_opacity(k);
             match self.page {
                 Page::Search => self.search_page(&mut child),
+                Page::Health => self.health_page(&mut child),
+                Page::Cleanup => self.cleanup_page(&mut child),
                 Page::Storage => self.storage_page(&mut child),
                 Page::Media => self.media_page(&mut child),
                 Page::Settings => self.settings_page(&mut child),
@@ -670,6 +764,8 @@ impl InsightApp {
             if let Ok(p) = std::env::var("INSIGHT_PAGE") {
                 let page = match p.as_str() {
                     "storage" => Page::Storage,
+                    "health" => Page::Health,
+                    "cleanup" => Page::Cleanup,
                     "media" => Page::Media,
                     "settings" => Page::Settings,
                     _ => Page::Search,
@@ -678,6 +774,17 @@ impl InsightApp {
             }
             if let Ok(q) = std::env::var("INSIGHT_QUERY") {
                 self.query = q;
+            }
+            if let Ok(k) = std::env::var("INSIGHT_KIND") {
+                self.kind = Kind::parse(&k);
+                self.group_by_app = self.kind == Some(Kind::App);
+            }
+            if std::env::var("INSIGHT_SORT").is_ok_and(|v| v == "size") {
+                self.sort = SortKey::Size;
+                self.desc = false;
+            }
+            if let Ok(t) = std::env::var("INSIGHT_CLEANUP_TAB") {
+                self.cleanup.tab = t.parse().unwrap_or(0);
             }
             if let Ok(q) = std::env::var("INSIGHT_MEDIA_QUERY") {
                 self.media_query = q.clone();

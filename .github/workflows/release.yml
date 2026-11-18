@@ -104,6 +104,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.check.outputs.tag }}
         run: |
+          # Checksums: the in-app updater refuses anything that doesn't match.
+          (cd release-assets && sha256sum Insight-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
           ls -la release-assets
           git tag "$TAG" "$GITHUB_SHA"
           git push origin "$TAG"

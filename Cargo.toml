@@ -1,6 +1,6 @@
 [package]
 name = "insight"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 repository = "https://github.com/ehmoratallar8990/insightsapp"
@@ -38,11 +38,15 @@ memchr = "2.8.3"
 notify = "8.2.2"
 open = "5.4.5"
 parking_lot = "0.13.0"
+plist = "1.10.4"
 rayon = "1.12.0"
 regex = "1.13.2"
+semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
-sysinfo = { version = "0.40.4", default-features = false, features = ["disk"] }
+sha2 = "0.11.1"
+starship-battery = "0.12.0"
+sysinfo = { version = "0.40.4", default-features = false, features = ["disk", "system", "network", "component"] }
 trash = "5.4.0"
 ureq = { version = "3", optional = true }
 xxhash-rust = { version = "0.8.21", features = ["xxh3"] }

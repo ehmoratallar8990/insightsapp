@@ -185,6 +185,12 @@ impl Index {
         self.entries.len()
     }
 
+    /// Child of `parent` named `name` (case-insensitive), if indexed.
+    pub fn child(&self, parent: u32, name: &str) -> Option<u32> {
+        let lower: Vec<u8> = name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+        self.lookup.get(&key(parent, &lower)).copied().filter(|&id| !self.entries[id as usize].is_deleted())
+    }
+
     pub fn live_count(&self) -> usize {
         self.entries.len() - self.deleted
     }

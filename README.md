@@ -4,13 +4,22 @@ A fast, private file search app in the spirit of *Everything* for Windows, built
 available for Windows and Linux. 100% Rust, one native binary, no Electron, no background daemon, no cloud.
 
 It indexes every file on your computer in seconds, finds files as you type, shows where your disk space goes,
-and lets you search your photos by what's in them, all on your own machine.
+keeps an eye on your computer's health, cleans junk like CleanMyMac / [Mole](https://github.com/tw93/Mole), and lets
+you search your photos by what's in them, all on your own machine. It keeps itself up to date.
 
 ![Search](docs/search.jpg)
 
 | Storage insights | Cleanup, biggest files, duplicates |
 |---|---|
 | ![Storage](docs/storage.jpg) | ![Cleanup](docs/cleanup.jpg) |
+
+| Health (live) | Cleanup toolbox |
+|---|---|
+| ![Health](docs/health.jpg) | ![Clean](docs/clean.jpg) |
+
+| Apps grouped by the app that owns them | |
+|---|---|
+| ![Apps tree](docs/apps-tree.jpg) | |
 
 | Media labels | Search photos in plain language |
 |---|---|
@@ -28,10 +37,17 @@ does one job quickly.
 - **Opens instantly:** the index is saved to disk, so a 2.6-million-file index is ready about 0.25 s after launch.
 - **Storage insights:** a zoomable space map, space by type, largest files and folders, safe cleanup suggestions,
   and a duplicate finder that verifies with full content hashes.
+- **Health at a glance:** a live, CleanMyMac-style panel with a 0–100 health score, disk, memory pressure, CPU
+  load and temperature, battery, network speed (with a speed test), connected drives and Bluetooth batteries,
+  and the apps using the most memory and CPU.
+- **Cleanup toolbox:** junk cleaning, one-click maintenance, an uninstaller that finds an app's leftovers, and a
+  project-folder purge.
+- **Always current:** checks GitHub releases, downloads updates in the background, verifies them with SHA-256 and
+  installs them when you quit.
 - **Photos by content:** an on-device AI model labels your photos (beach, receipt, screenshot, dog…) and lets you
   search them in plain language (*"mountains reflected in a lake"*).
-- **Private:** nothing is uploaded. The only network use is the one-time model download, and only if you
-  turn the media feature on.
+- **Private:** nothing is uploaded. Network use is limited to the update check (GitHub), the one-time model
+  download if you turn the media feature on, and the speed test when you click it.
 
 ## Performance
 
@@ -48,6 +64,10 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 | Search a path fragment `src/main` | — | **9.6 ms** | |
 | Spotlight `mdfind -name main.rs` (for reference) | 50–70 ms | | narrower scope |
 | Storage analysis (sizes, suggestions, largest) | — | **68 ms** | |
+| Junk scan (caches, logs, browser & developer caches, leftovers) | — | **0.4 s** (7.7 GB in 11 categories) | |
+| Find project build folders (`node_modules`, `target`…) | walk the disk | **17 ms** (answered from the index) | |
+| List installed apps with sizes | — | **1.2 s** (66 apps) | |
+| Health panel refresh | — | **1×/s**, sampler idle when the page is hidden | |
 | Photo understanding (CLIP ViT-B/32) | — | **91 img/s** on the Apple GPU, 42 img/s on CPU | |
 | App download | — | **12 MB** (universal macOS zip) | |
 
@@ -64,6 +84,11 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 - **Linux live updates** watch your home folder, since inotify can't cheaply watch a whole disk. Other locations
   update on the next rescan.
 - **Videos** are searchable by name, type, size and date, but the AI model labels still images only.
+- **Cleaning deletes caches permanently** (like Mole and CleanMyMac — moving 8 GB of cache to the Trash
+  frees nothing). Uninstalls, login items and storage suggestions go through the Trash. Everything asks first.
+- **Some maintenance tasks need your password** (flush DNS, free RAM, reindex Spotlight); they're marked 🔒.
+- **Bluetooth battery levels** are macOS-only. On Windows and Linux the uninstaller drives the system's own
+  uninstallers / Flatpak / Snap rather than deleting files itself.
 - The macOS app is ad-hoc signed, not notarized (no paid Apple developer account). The installer handles this.
 
 ## Features
@@ -74,8 +99,12 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 - Filter chips: Folders, Images, Videos, Audio, Documents, Archives, Code, Apps.
 - Matches highlighted in the results, plus a detail panel with a preview, size, dates, full path and AI labels.
 - Keyboard first: type anywhere to search, ↑/↓ to move, **Enter** to open, **⌘/Ctrl+Enter** to reveal in
-  Finder/Explorer, **⌘/Ctrl+C** to copy the path, **Esc** to clear. **⌘1–4** switch tabs.
+  Finder/Explorer, **⌘/Ctrl+C** to copy the path, **Esc** to clear. **⌘1–6** switch tabs.
 - Right-click a result to open, reveal, copy the path or name, or move it to the Trash.
+
+- **Group by app:** the Apps filter shows results as a tree under the app or package that owns them
+  (`Affinity Photo 2.app` → its 60 libraries, `~/.lmstudio`, Homebrew's `llvm`…), with group totals,
+  sortable by size, name or date. Toggle it for any search with **🌳 Group by app**.
 
 **Query syntax** (terms combine with AND; matching ignores case)
 
@@ -108,6 +137,36 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
   (not every parent of it).
 - **Duplicate finder:** groups by size, then a quick sampled hash, then a full xxh3 content hash. Hard links
   are not counted as duplicates. Keep one copy, trash the rest.
+
+**Health**
+- Score from 0–100 with the reasons it dropped (low disk, memory pressure, sustained CPU load, heat, battery
+  wear, heavy swap, long uptime), like Mole's `mo status`.
+- Cards for disk (→ **Free Up** opens the cleaner), memory pressure with **Free Up** (releases inactive memory),
+  CPU load, temperature, per-core bars, battery charge, time left, health and cycles, network up/down with a
+  **Test Speed** button, external drives with eject, and Bluetooth devices with battery levels.
+- *Today's recommendation* picks the most useful next step; top memory / CPU apps can be quit from the list.
+
+**Cleanup** (inspired by [Mole](https://github.com/tw93/Mole) and CleanMyMac)
+- **Clean:** user caches, logs, crash reports, Trash, old temp files, Safari / Chrome / Firefox / Edge / Brave /
+  Arc caches, Xcode DerivedData and device support, simulator caches, Homebrew, npm, pnpm, yarn, pip, Go, Cargo,
+  Gradle, CocoaPods and JetBrains caches, plus leftovers of apps you already removed (marked REVIEW, never
+  pre-selected). Expand any category to pick individual items.
+- **Optimize:** flush DNS, free RAM, rebuild Quick Look thumbnails, rebuild Launch Services ("Open With"
+  duplicates), reset font caches, reindex Spotlight, restart Finder & Dock, verify the startup disk — one by one
+  or **Run recommended**. Lists login & background items, and removes the ones you don't want.
+- **Uninstall:** every app with its size and the files it spread around `~/Library` (caches, logs, saved state,
+  preferences, containers, launch agents, helpers). Personal data is listed but kept unless you tick it. Warns
+  when the app is still running.
+- **Projects:** rebuildable build folders (`node_modules`, `target`, `.build`, `build`/`dist`, `.next`, `Pods`…)
+  — only when the marker file proving they're rebuildable sits next to them. Folders touched in the last 7 days
+  stay unticked.
+
+**Updates**
+- Checks GitHub releases at launch and every 6 hours, downloads this platform's build in the background and
+  verifies it against the release's `SHA256SUMS.txt` — no matching checksum, no install.
+- A sidebar banner offers **Restart & update**; otherwise the update is swapped in when you quit. The swap is an
+  atomic rename, so a failed update leaves the current version untouched. Both behaviours can be turned off in
+  Settings → Updates.
 
 **Media**
 - Counts and sizes of images, videos and audio.
@@ -218,6 +277,11 @@ cargo test --release                   # unit tests (walker, index, query engine
 ./target/release/insight --cli "ext:pdf size:>10mb"   # headless search + timings
 ./target/release/insight --cli --storage              # headless storage analysis
 ./target/release/insight --classify photo.jpg         # print AI labels for images
+./target/release/insight --health                     # health score + live stats
+./target/release/insight --cleanup                    # junk scan (read-only)
+./target/release/insight --cli --purge                # project build folders from the index
+./target/release/insight --apps                       # installed apps + leftovers
+./target/release/insight --update-check               # is a newer release available?
 ```
 
 - **macOS:** `./scripts/package-macos.sh` produces a universal, ad-hoc signed `dist/Insight.app` and zip.
@@ -228,7 +292,8 @@ cargo test --release                   # unit tests (walker, index, query engine
 
 **Releases are automatic.** Every push to `main` whose `Cargo.toml` version has no `v<version>` tag yet
 triggers the [Release workflow](.github/workflows/release.yml): it tests and builds on macOS (universal app),
-Windows and Linux, tags the commit and publishes a GitHub release with all three downloads. To ship, bump the
+Windows and Linux, tags the commit and publishes a GitHub release with all three downloads plus
+`SHA256SUMS.txt`. Installed copies pick the release up on their own (see **Updates** above). To ship, bump the
 version and push, or run `./scripts/release.sh 0.2.0`, which does exactly that. CI runs the tests on all three
 platforms for every push.
 
@@ -240,6 +305,9 @@ platforms for every push.
   `xattr -dr com.apple.quarantine /Applications/Insight.app`.
 - **Index external drives:** Settings → Indexed locations → add `/Volumes/YourDrive` (on Windows the drive
   letter, e.g. `D:\`).
+- **Update failed with "no write access":** the app folder isn't writable by your user (e.g. installed by an
+  admin into `/Applications`). Re-run the installer, or download the new release manually.
+- **Cleaning skipped some items:** files in use by a running app can't be deleted; quit the app and rescan.
 - **Results seem stale:** Settings → **Rescan now**. The status bar shows whether live watching is active.
 - **Start from scratch:** quit Insight and delete its data folder: `~/Library/Application Support/insight`
   (macOS), `~/.local/share/insight` (Linux), `%LOCALAPPDATA%\insight` (Windows).
