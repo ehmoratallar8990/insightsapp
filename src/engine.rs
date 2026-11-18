@@ -35,6 +35,7 @@ pub struct SearchResponse {
     pub elapsed_us: u64,
     pub highlight: Vec<String>,
     pub epoch: u64,
+    pub fuzzy: bool,
 }
 
 pub struct Engine {
@@ -311,6 +312,7 @@ fn search_worker(eng: Arc<Engine>, rx: Receiver<SearchRequest>, tx: Sender<Searc
             elapsed_us: out.elapsed_us,
             highlight: q.highlight,
             epoch,
+            fuzzy: out.fuzzy,
         });
         eng.ctx.request_repaint();
     }

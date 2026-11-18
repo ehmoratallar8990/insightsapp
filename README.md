@@ -104,7 +104,12 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 
 - **Group by app:** the Apps filter shows results as a tree under the app or package that owns them
   (`Affinity Photo 2.app` → its 60 libraries, `~/.lmstudio`, Homebrew's `llvm`…), with group totals,
-  sortable by size, name or date. Toggle it for any search with **🌳 Group by app**.
+  sortable by size, name or date, with app sizes measured on disk. **⊞ / ⊟** in the header expand or collapse
+  every group. Toggle the tree for any search with **🌳 Group by app**.
+- **Fuzzy search:** when a query finds fewer than 25 exact matches, Insight adds names containing your letters
+  in order (`affphoto` → *Affinity Photo*) or with one typo (`photshop` → *Photoshop*), ranked after exact hits,
+  with the matched letters highlighted. Still 11–16 ms over 2.5M files.
+- **Clear** the search with the ✕ in the search bar (or Esc).
 
 **Query syntax** (terms combine with AND; matching ignores case)
 
@@ -124,6 +129,8 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 | `label:dog`, `label:receipt` | by AI photo label |
 | `re:^IMG_\d+` | regular expression |
 | `hidden:no` | skip dot-files |
+| `affphoto`, `photshop` | fuzzy: letters in order or one typo — kicks in when exact hits are few (toggle **≈ Fuzzy**) |
+| `fuzzy:no` | exact matches only |
 
 **Storage**
 - Disk usage rings and *space by type* (click a type to list its biggest files).

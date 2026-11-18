@@ -16,6 +16,12 @@
 //!   label:dog        media label assigned by the on-device classifier
 //!   re:^IMG_\d+      regular expression on the name
 //!   hidden:yes|no    dot-files
+//!   fuzzy:no         disable fuzzy fallback for this query
+//!
+//! Fuzzy: when plain name terms find fewer than `FUZZY_MIN` exact hits, the search
+//! is re-run accepting names that contain the term's letters *in order* (fzf-style:
+//! `affphoto` → "Affinity Photo"), tolerating one wrong / extra letter for longer
+//! terms. Exact hits always rank first.
 
 use crate::filetype::Kind;
 use crate::index::{F_HIDDEN, Index, NONE};
@@ -59,12 +65,56 @@ struct Clause {
     pred: Pred,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Query {
     clauses: Vec<Clause>,
+    /// Fuzzy fallback allowed (default on; `fuzzy:no` turns it off).
+    pub fuzzy: bool,
     /// Plain (non-negated) name terms, used for relevance scoring + highlighting.
     pub highlight: Vec<String>,
     pub labels: Vec<String>,
+}
+
+impl Default for Query {
+    fn default() -> Self {
+        Query { clauses: Vec::new(), fuzzy: true, highlight: Vec::new(), labels: Vec::new() }
+    }
+}
+
+/// Below this many exact hits, fuzzy matches are added.
+pub const FUZZY_MIN: usize = 25;
+
+/// Where `term`'s letters occur in order in `name` (lower-case), allowing one
+/// skipped term letter when `typo` is set. Returns (matched positions, skipped).
+/// The match must stay compact so short terms don't match noise.
+pub fn fuzzy_positions(name: &[u8], term: &[u8], typo: bool) -> Option<(Vec<usize>, bool)> {
+    if term.len() < 3 || name.len() < term.len().saturating_sub(1) {
+        return None;
+    }
+    let mut pos = Vec::with_capacity(term.len());
+    let mut from = 0usize;
+    let mut skipped = false;
+    let mut j = 0;
+    while j < term.len() {
+        match memchr::memchr(term[j], &name[from..]) {
+            Some(p) => {
+                pos.push(from + p);
+                from += p + 1;
+            }
+            None if typo && !skipped && term.len() >= 5 && j > 0 => skipped = true,
+            None => return None,
+        }
+        j += 1;
+    }
+    let (first, last) = (*pos.first()?, *pos.last()?);
+    let span = last - first + 1;
+    // Compactness keeps short terms from matching noise (random hashes etc.):
+    // letters-in-order may spread to ~2× the term; with a typo it must stay tight.
+    let limit = if skipped { term.len() + term.len() / 2 } else { term.len() * 2 + 2 };
+    if span > limit {
+        return None;
+    }
+    Some((pos, skipped))
 }
 
 fn parse_size(s: &str) -> Option<u64> {
@@ -196,7 +246,7 @@ impl Query {
                 matches!(
                     k.to_ascii_lowercase().as_str(),
                     "ext" | "type" | "kind" | "size" | "dm" | "modified" | "path" | "in" | "re"
-                        | "regex" | "label" | "tag" | "hidden" | "file" | "folder" | "dir"
+                        | "regex" | "label" | "tag" | "hidden" | "file" | "folder" | "dir" | "fuzzy"
                 )
             }) {
                 match k.to_ascii_lowercase().as_str() {
@@ -232,6 +282,10 @@ impl Query {
                         Pred::Label(l)
                     }
                     "hidden" => Pred::Hidden(matches!(v, "yes" | "true" | "1" | "")),
+                    "fuzzy" => {
+                        out.fuzzy = !matches!(v, "no" | "off" | "false" | "0");
+                        continue;
+                    }
                     "file" => Pred::OnlyFiles,
                     "folder" | "dir" => Pred::OnlyDirs,
                     _ => continue,
@@ -291,6 +345,8 @@ pub trait LabelSource: Sync {
 pub struct SearchOutput {
     pub ids: Vec<u32>,
     pub elapsed_us: u64,
+    /// Fuzzy matches were added (few exact hits).
+    pub fuzzy: bool,
 }
 
 struct Ctx<'a> {
@@ -315,29 +371,39 @@ pub fn run(idx: &Index, q: &Query, sort: SortKey, desc: bool, labels: &dyn Label
 
     const CHUNK: usize = 16 * 1024;
     let n = idx.len();
-    let mut ids: Vec<u32> = (0..n.div_ceil(CHUNK))
-        .into_par_iter()
-        .flat_map_iter(|c| {
-            let lo = c * CHUNK;
-            let hi = ((c + 1) * CHUNK).min(n);
-            let mut out = Vec::new();
-            let mut pathbuf = Vec::with_capacity(256);
-            let mut cached_parent = NONE;
-            for i in lo..hi {
-                if matches(&ctx, q, i as u32, &mut pathbuf, &mut cached_parent) {
-                    out.push(i as u32);
+    let pass = |fuzzy: bool| -> Vec<u32> {
+        (0..n.div_ceil(CHUNK))
+            .into_par_iter()
+            .flat_map_iter(|c| {
+                let lo = c * CHUNK;
+                let hi = ((c + 1) * CHUNK).min(n);
+                let mut out = Vec::new();
+                let mut pathbuf = Vec::with_capacity(256);
+                let mut cached_parent = NONE;
+                for i in lo..hi {
+                    if matches(&ctx, q, i as u32, &mut pathbuf, &mut cached_parent, fuzzy) {
+                        out.push(i as u32);
+                    }
                 }
-            }
-            out
-        })
-        .collect();
+                out
+            })
+            .collect()
+    };
+    let mut ids = pass(false);
+    let has_name_terms = q.clauses.iter().any(|c| !c.neg && matches!(&c.pred, Pred::Name(a) if a.iter().any(|t| t.len() >= 3)));
+    let mut fuzzy = false;
+    if q.fuzzy && has_name_terms && ids.len() < FUZZY_MIN {
+        let more = pass(true);
+        fuzzy = more.len() > ids.len();
+        ids = more;
+    }
 
     sort_ids(idx, &mut ids, q, sort, desc);
-    SearchOutput { ids, elapsed_us: t.elapsed().as_micros() as u64 }
+    SearchOutput { ids, elapsed_us: t.elapsed().as_micros() as u64, fuzzy }
 }
 
 #[inline]
-fn matches(ctx: &Ctx, q: &Query, id: u32, pathbuf: &mut Vec<u8>, cached_parent: &mut u32) -> bool {
+fn matches(ctx: &Ctx, q: &Query, id: u32, pathbuf: &mut Vec<u8>, cached_parent: &mut u32, fuzzy: bool) -> bool {
     let idx = ctx.idx;
     let e = &idx.entries[id as usize];
     if e.is_deleted() || e.parent == NONE {
@@ -346,7 +412,10 @@ fn matches(ctx: &Ctx, q: &Query, id: u32, pathbuf: &mut Vec<u8>, cached_parent: 
     let name = idx.lower_name(id);
     for (ci, c) in q.clauses.iter().enumerate() {
         let hit = match &c.pred {
-            Pred::Name(_) => ctx.name_finders[ci].iter().any(|f| f.find(name).is_some()),
+            Pred::Name(alts) => {
+                ctx.name_finders[ci].iter().any(|f| f.find(name).is_some())
+                    || (fuzzy && !c.neg && alts.iter().any(|t| fuzzy_positions(name, t, true).is_some()))
+            }
             Pred::Path(_) => {
                 if *cached_parent != e.parent {
                     idx.write_lower_dir_path(e.parent, pathbuf);
@@ -406,8 +475,13 @@ fn relevance(idx: &Index, id: u32, terms: &[Vec<u8>]) -> u32 {
             // Word-boundary matches beat mid-word matches.
             let b = name[p - 1];
             score += if b.is_ascii_alphanumeric() { 3 } else { 2 };
+        } else if let Some((pos, skipped)) = fuzzy_positions(name, t, true) {
+            // Fuzzy: worse than any substring hit; compact, word-start matches first.
+            let starts_word = pos[0] == 0 || !name[pos[0] - 1].is_ascii_alphanumeric();
+            let span = pos[pos.len() - 1] - pos[0] + 1 - pos.len();
+            score += 5 + (!starts_word) as u32 + (span.min(12) / 4) as u32 + skipped as u32 * 2;
         } else {
-            score += 4;
+            score += 12;
         }
     }
     // Prefer shorter names and folders slightly; keep within u32 range.
@@ -482,6 +556,11 @@ mod tests {
         assert_eq!(names("*.md"), vec!["README.md"]);
         assert_eq!(names("folder: !proj"), vec!["src"]);
         assert_eq!(names("readme|main !md"), vec!["main.rs"]);
+        // Fuzzy fallback: letters in order, and one typo for longer terms.
+        assert_eq!(names("hldyphoto"), vec!["Holiday Photo.jpg"]);
+        assert_eq!(names("holidya"), vec!["Holiday Photo.jpg"]);
+        assert!(names("hldyphoto fuzzy:no").is_empty());
+        assert!(names("zzq").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -63,6 +63,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// Swap a downloaded update in when Insight quits.
     pub install_on_quit: bool,
+    /// Add fuzzy (letters-in-order, one-typo) matches when exact hits are few.
+    pub fuzzy: bool,
 }
 
 impl Default for Settings {
@@ -79,6 +81,7 @@ impl Default for Settings {
             dup_min_mb: 1.0,
             auto_update: true,
             install_on_quit: true,
+            fuzzy: true,
         }
     }
 }
@@ -99,7 +102,9 @@ pub struct InsightApp {
     pub sort: SortKey,
     pub desc: bool,
     pub seq: u64,
-    pub last_sent: Option<(String, Option<Kind>, SortKey, bool, u64, bool)>,
+    pub last_sent: Option<(String, Option<Kind>, SortKey, bool, u64, (bool, bool))>,
+    /// The last response included fuzzy matches.
+    pub results_fuzzy: bool,
     pub results: Vec<u32>,
     pub results_seq: u64,
     pub fade_seq: u64,
@@ -194,6 +199,7 @@ impl InsightApp {
             desc: false,
             seq: 0,
             last_sent: None,
+            results_fuzzy: false,
             results: Vec::new(),
             results_seq: 0,
             fade_seq: 0,
@@ -258,7 +264,7 @@ impl InsightApp {
     /// Send a search if any input changed.
     pub fn pump_search(&mut self) {
         let epoch = self.engine.epoch.load(Ordering::Relaxed);
-        let key = (self.query.clone(), self.kind, self.sort, self.desc, epoch, self.settings.show_hidden);
+        let key = (self.query.clone(), self.kind, self.sort, self.desc, epoch, (self.settings.show_hidden, self.settings.fuzzy));
         if self.last_sent.as_ref() != Some(&key) {
             self.seq += 1;
             let user_change = self.last_sent.as_ref().is_none_or(|l| (&l.0, l.1, l.2, l.3) != (&key.0, key.1, key.2, key.3));
@@ -268,6 +274,9 @@ impl InsightApp {
             let mut text = self.query.clone();
             if !self.settings.show_hidden && !text.contains("hidden:") {
                 text.push_str(" hidden:no");
+            }
+            if !self.settings.fuzzy && !text.contains("fuzzy:") {
+                text.push_str(" fuzzy:no");
             }
             self.engine.search(SearchRequest { seq: self.seq, text, kind: self.kind, sort: self.sort, desc: self.desc });
             self.last_sent = Some(key);
@@ -286,6 +295,7 @@ impl InsightApp {
             self.results_seq = r.seq;
             self.results_elapsed_us = r.elapsed_us;
             self.highlight = r.highlight;
+            self.results_fuzzy = r.fuzzy;
             self.results_id_epoch = self.engine.id_epoch.load(Ordering::Relaxed);
             let _ = r.epoch;
             if query_changed {

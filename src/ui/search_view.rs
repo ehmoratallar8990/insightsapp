@@ -32,12 +32,15 @@ pub struct TreeGroup {
     pub newest: u32,
     /// Indices into `results`.
     pub items: Vec<usize>,
+    /// The bundle's own result row, shown only when nothing inside it matched.
+    pub self_item: Option<usize>,
 }
 
 pub struct TreeCache {
     seq: u64,
     epoch: u64,
     order: (SortKey, bool),
+    sized: bool,
     pub groups: Vec<TreeGroup>,
 }
 
@@ -106,6 +109,7 @@ pub fn build_tree(idx: &crate::index::Index, results: &[u32]) -> Vec<TreeGroup> 
                     title: name.strip_suffix(".app").unwrap_or(name).to_string(),
                     path: idx.path_string(a),
                     is_app: true,
+                    self_item: None,
                     app_id: Some(a),
                     bytes: 0,
                     newest: 0,
@@ -116,7 +120,7 @@ pub fn build_tree(idx: &crate::index::Index, results: &[u32]) -> Vec<TreeGroup> 
             None => {
                 let (key, title) = owner_of_path(&idx.path_string(id), &home);
                 *by_key.entry(key.clone()).or_insert_with(|| {
-                    groups.push(TreeGroup { path: key.clone(), key, title, is_app: false, app_id: None, bytes: 0, newest: 0, items: Vec::new() });
+                    groups.push(TreeGroup { path: key.clone(), key, title, is_app: false, self_item: None, app_id: None, bytes: 0, newest: 0, items: Vec::new() });
                     groups.len() - 1
                 })
             }
@@ -126,6 +130,7 @@ pub fn build_tree(idx: &crate::index::Index, results: &[u32]) -> Vec<TreeGroup> 
         if app == Some(id) {
             // The bundle itself is the group header; don't repeat it as a child.
             g.newest = g.newest.max(e.mtime);
+            g.self_item = Some(ri);
             continue;
         }
         if !e.is_dir() {
@@ -133,6 +138,11 @@ pub fn build_tree(idx: &crate::index::Index, results: &[u32]) -> Vec<TreeGroup> 
         }
         g.newest = g.newest.max(e.mtime);
         g.items.push(ri);
+    }
+    for g in groups.iter_mut() {
+        if g.items.is_empty() {
+            g.items.extend(g.self_item);
+        }
     }
     groups
 }
@@ -146,6 +156,17 @@ fn highlighted(name: &str, terms: &[String], font: FontId, base: Color32, hi: Co
     for t in terms {
         let t = t.to_ascii_lowercase();
         if t.is_empty() {
+            continue;
+        }
+        if !lower.contains(&t) {
+            // Fuzzy hit: mark the individual letters that matched.
+            if let Some((pos, _)) = crate::search::fuzzy_positions(lower.as_bytes(), t.as_bytes(), true) {
+                for p in pos {
+                    if p < marks.len() {
+                        marks[p] = true;
+                    }
+                }
+            }
             continue;
         }
         let mut start = 0;
@@ -207,7 +228,13 @@ impl InsightApp {
         let info = if self.results.is_empty() && n_live == 0 {
             String::new()
         } else {
-            format!("{} results · {:.1} ms", fmt_count(self.results.len() as u64), self.results_elapsed_us as f64 / 1000.0)
+            format!(
+                "{} result{}{} · {:.1} ms",
+                fmt_count(self.results.len() as u64),
+                if self.results.len() == 1 { "" } else { "s" },
+                if self.results_fuzzy { " · ≈ fuzzy" } else { "" },
+                self.results_elapsed_us as f64 / 1000.0
+            )
         };
         let help_rect = Rect::from_center_size(pos2(bar.right() - 26.0, bar.center().y), vec2(28.0, 28.0));
         let help = ui.interact(help_rect, Id::unique("help-btn"), Sense::click());
@@ -221,7 +248,54 @@ impl InsightApp {
         let info_w = info_galley.size().x;
         ui.painter().galley(pos2(help_rect.left() - 12.0 - info_w, bar.center().y - info_galley.size().y / 2.0), info_galley, MUTED);
 
-        let edit_rect = Rect::from_min_max(pos2(bar.left() + 44.0, bar.top() + 8.0), pos2(help_rect.left() - 24.0 - info_w, bar.bottom() - 8.0));
+        // Clear button (fades in when there is something to clear).
+        let has_text = !self.query.is_empty();
+        let ca = ui.ctx().animate_bool_with_time(Id::unique("clear-a"), has_text, 0.15);
+        let clear_rect = Rect::from_center_size(pos2(help_rect.left() - 24.0 - info_w - 14.0, bar.center().y), vec2(24.0, 24.0));
+        let mut clear_w = 0.0;
+        if ca > 0.0 {
+            clear_w = 34.0;
+            let r = ui.interact(clear_rect, Id::unique("clear-btn"), Sense::click()).on_hover_text("Clear search (Esc)").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let h = ui.ctx().animate_bool_with_time(Id::unique("clear-h"), r.hovered(), 0.12);
+            let p = ui.painter();
+            p.circle_filled(clear_rect.center(), 10.0 + h, with_alpha(lerp_color(SURFACE3, pal.accent, h * 0.6), ca));
+            let c = clear_rect.center();
+            let d = 3.5;
+            let st = Stroke::new(1.6, with_alpha(lerp_color(MUTED, TEXT, h), ca));
+            p.line_segment([c + vec2(-d, -d), c + vec2(d, d)], st);
+            p.line_segment([c + vec2(-d, d), c + vec2(d, -d)], st);
+            if r.clicked() && has_text {
+                self.query.clear();
+                self.focus_search = true;
+                self.selected = Some(0);
+            }
+        }
+
+        // Fuzzy toggle pill.
+        let fz = self.settings.fuzzy;
+        let fg = ui.painter().layout_no_wrap("≈ Fuzzy".to_string(), FontId::proportional(12.0), TEXT);
+        let fsize = fg.size() + vec2(18.0, 10.0);
+        let fuzzy_rect = Rect::from_min_size(pos2(help_rect.left() - 24.0 - info_w - clear_w - 8.0 - fsize.x, bar.center().y - fsize.y / 2.0), fsize);
+        let fr = ui
+            .interact(fuzzy_rect, Id::unique("fuzzy-btn"), Sense::click())
+            .on_hover_text("Fuzzy matching: when exact hits are few, also find names with the letters in order or one typo (affphoto → Affinity Photo, photshop → Photoshop). Add fuzzy:no to a query to skip it.")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let on = ui.ctx().animate_bool_with_time(Id::unique("fuzzy-on"), fz, 0.18);
+        let fh = ui.ctx().animate_bool_with_time(Id::unique("fuzzy-h"), fr.hovered(), 0.12);
+        ui.painter().rect(
+            fuzzy_rect,
+            CornerRadius::same(11),
+            lerp_color(lerp_color(SURFACE2, SURFACE3, fh), with_alpha(pal.accent2, 0.22), on),
+            Stroke::new(1.0, lerp_color(BORDER, pal.accent2, on.max(fh * 0.5))),
+            StrokeKind::Inside,
+        );
+        ui.painter().galley(fuzzy_rect.center() - fg.size() / 2.0, fg, lerp_color(FAINT, TEXT, on.max(fh)));
+        if fr.clicked() {
+            self.settings.fuzzy = !fz;
+        }
+        let fuzzy_w = fsize.x + 8.0;
+
+        let edit_rect = Rect::from_min_max(pos2(bar.left() + 44.0, bar.top() + 8.0), pos2(help_rect.left() - 24.0 - info_w - clear_w - fuzzy_w, bar.bottom() - 8.0));
         let prev_query = self.query.clone();
         let edit = egui::TextEdit::singleline(&mut self.query)
             .id(edit_id)
@@ -271,6 +345,7 @@ impl InsightApp {
                 {
                     self.group_by_app = !self.group_by_app;
                 }
+
             });
         });
         ui.add_space(12.0);
@@ -316,6 +391,8 @@ impl InsightApp {
                 ("label:dog   label:screenshot", "AI media labels (Media tab)"),
                 ("re:^IMG_\\d+", "regular expression"),
                 ("hidden:no", "skip dot-files"),
+                ("affphoto   photshop", "fuzzy: letters in order / one typo, when exact hits are few"),
+                ("fuzzy:no", "exact matches only (or switch ≈ Fuzzy off)"),
             ];
             egui::Grid::new("help-grid").num_columns(2).spacing(vec2(28.0, 6.0)).show(ui, |ui| {
                 for (a, b) in rows {
@@ -325,7 +402,7 @@ impl InsightApp {
                 }
             });
             ui.add_space(6.0);
-            ui.label(egui::RichText::new("↑/↓ select · Enter open · ⌘/Ctrl+Enter reveal · ⌘/Ctrl+C copy path · Esc clear").size(12.0).color(FAINT));
+            ui.label(egui::RichText::new("↑/↓ select · Enter open · ⌘/Ctrl+Enter reveal · ⌘/Ctrl+C copy path · Esc clear · ⊞/⊟ in the header expand/collapse app groups").size(12.0).color(FAINT));
         });
     }
 
@@ -398,6 +475,14 @@ impl InsightApp {
 
     fn results_table(&mut self, ui: &mut Ui, now: f64) {
         let pal = self.pal;
+        // App bundle sizes in the tree come from the storage rollup; compute it in the
+        // background (before taking the index lock below).
+        if self.group_by_app && self.report.is_none() && self.report_rx.is_none() {
+            self.ensure_report(ui, false);
+        }
+        if self.report_rx.is_some() && self.page == super::app::Page::Search {
+            self.ensure_report(ui, false); // collects the finished report
+        }
         let full = ui.max_rect();
         ui.painter().rect(full, CornerRadius::same(14), SURFACE, Stroke::new(1.0, BORDER), StrokeKind::Inside);
         let w = full.width();
@@ -416,6 +501,29 @@ impl InsightApp {
         self.header_cell(ui, hcell(2), "Size", SortKey::Size, true);
         self.header_cell(ui, hcell(3), "Modified", SortKey::Modified, true);
 
+        // Tree controls in the header (right of the Name label).
+        if self.group_by_app {
+            if let Some(t) = self.tree.as_ref() {
+                let keys: Vec<String> = t.groups.iter().map(|g| g.key.clone()).collect();
+                let mut x = xs[1] - 10.0;
+                for (label, tip, expand) in [("⊟", "Collapse all groups", false), ("⊞", "Expand all groups", true)] {
+                    let r = Rect::from_center_size(pos2(x - 12.0, hdr.center().y), vec2(24.0, 22.0));
+                    x -= 30.0;
+                    let resp = ui.interact(r, Id::unique(("tree-ctl", expand)), Sense::click()).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let h = ui.ctx().animate_bool_with_time(Id::unique(("tree-ctl-h", expand)), resp.hovered(), 0.12);
+                    ui.painter().rect_filled(r, CornerRadius::same(6), lerp_color(SURFACE2, with_alpha(pal.accent, 0.35), h));
+                    ui.painter().text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(14.0), lerp_color(MUTED, TEXT, h));
+                    if resp.clicked() {
+                        if expand {
+                            self.tree_open.extend(keys.iter().cloned());
+                        } else {
+                            self.tree_open.clear();
+                        }
+                    }
+                }
+            }
+        }
+
         let list_rect = Rect::from_min_max(pos2(full.left(), hdr.bottom() + 2.0), pos2(full.right(), full.bottom() - 4.0));
         let mut lui = ui.new_child(UiBuilder::new().max_rect(list_rect).id_salt("rows"));
 
@@ -433,7 +541,8 @@ impl InsightApp {
         if tree_on {
             let epoch = self.results_id_epoch;
             let order = (self.sort, self.desc);
-            if self.tree.as_ref().is_none_or(|t| t.seq != self.results_seq || t.epoch != epoch || t.order != order) {
+            let sized = self.report.as_ref().is_some_and(|r| r.epoch == epoch);
+            if self.tree.as_ref().is_none_or(|t| t.seq != self.results_seq || t.epoch != epoch || t.order != order || t.sized != sized) {
                 let mut groups = build_tree(&idx, &self.results);
                 // A bundle's own size (incl. resources) when the storage rollup is available.
                 if let Some(r) = self.report.as_ref().filter(|r| r.epoch == epoch) {
@@ -452,13 +561,24 @@ impl InsightApp {
                 if self.desc && self.sort != SortKey::Relevance {
                     groups.reverse();
                 }
+                // No ranking to preserve: show each group's biggest items first.
+                if self.sort == SortKey::Relevance && self.highlight.is_empty() {
+                    for g in groups.iter_mut() {
+                        g.items.sort_by_key(|&ri| std::cmp::Reverse(idx.entries[self.results[ri] as usize].size));
+                    }
+                }
                 // New query: open the top group unless the user already opened some.
                 if !groups.iter().any(|g| self.tree_open.contains(&g.key)) {
                     if let Some(g) = groups.first() {
                         self.tree_open.insert(g.key.clone());
                     }
                 }
-                self.tree = Some(TreeCache { seq: self.results_seq, epoch, order, groups });
+                // Keep the selection on something visible: the first item of the first open group.
+                let sel_visible = self.selected.is_some_and(|s| groups.iter().any(|g| self.tree_open.contains(&g.key) && g.items.contains(&s)));
+                if !sel_visible {
+                    self.selected = groups.iter().find(|g| self.tree_open.contains(&g.key)).and_then(|g| g.items.first().copied());
+                }
+                self.tree = Some(TreeCache { seq: self.results_seq, epoch, order, sized, groups });
             }
             let t = self.tree.as_ref().unwrap();
             self.tree_rows.clear();

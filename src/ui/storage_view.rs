@@ -72,7 +72,7 @@ fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
 }
 
 impl InsightApp {
-    fn ensure_report(&mut self, ui: &Ui, force: bool) {
+    pub(crate) fn ensure_report(&mut self, ui: &Ui, force: bool) {
         if let Some(rx) = &self.report_rx {
             if let Ok(r) = rx.try_recv() {
                 self.report = Some(Arc::new(r));
