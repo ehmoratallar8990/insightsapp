@@ -172,6 +172,33 @@ fn jpeg_small(path: &Path) -> Option<image::DynamicImage> {
     Some(image::DynamicImage::ImageLuma8(image::GrayImage::from_raw(w, h, luma)?))
 }
 
+/// A large preview for the viewer: CR3s use their built-in preview, other decodable
+/// formats are decoded and scaled to `max_side`.
+pub fn preview_image(path: &Path, max_side: u32) -> Option<image::DynamicImage> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    if ext == "cr3" {
+        return cr3_preview(path);
+    }
+    if crate::filetype::is_decodable_image(&path.to_string_lossy().to_lowercase()) {
+        return crate::media::decode::open(path, max_side).map(|i| if i.width().max(i.height()) > max_side { i.thumbnail(max_side, max_side) } else { i });
+    }
+    None
+}
+
+/// Photos worth showing in the viewer: decodable files, plus CR3s with no
+/// decodable twin (RAW+JPEG pairs appear once, via the JPEG).
+pub fn viewable(scan: &Scan, idxs: &[usize]) -> Vec<usize> {
+    let decodable = |p: &Photo| crate::filetype::is_decodable_image(&p.path.to_string_lossy().to_lowercase());
+    let with_twin: std::collections::HashSet<(PathBuf, String)> = idxs.iter().map(|&i| &scan.photos[i]).filter(|p| decodable(p)).map(|p| twin_key(&p.path)).collect();
+    idxs.iter()
+        .copied()
+        .filter(|&i| {
+            let p = &scan.photos[i];
+            decodable(p) || (p.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cr3")) && !with_twin.contains(&twin_key(&p.path)))
+        })
+        .collect()
+}
+
 fn quality_of(path: &Path) -> Option<Quality> {
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
     let img = match ext.as_str() {
@@ -576,8 +603,8 @@ pub struct Options {
     pub formats: [bool; 5],
     pub split_formats: bool,
     pub zip_raw: bool,
-    /// Move into the destination (copy → verify → remove original). Off = copy.
-    pub move_files: bool,
+    /// How files get into the destination.
+    pub method: Mode,
     /// After a move, leave a symlink at the original path pointing to the new file.
     pub link_back: bool,
     /// Also bring images without camera metadata into `<dest>/Other images/`.
@@ -603,7 +630,7 @@ impl Default for Options {
             formats: [true; 5],
             split_formats: true,
             zip_raw: false,
-            move_files: true,
+            method: Mode::Safest,
             link_back: false,
             include_others: true,
             tags: String::new(),
@@ -872,10 +899,28 @@ pub fn build_ops(scan: &Scan, events: &[Event], opts: &Options, dest: &Path) -> 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Copy → verify → remove the original. Everything ends up in the destination.
-    Move,
-    /// Verified copy; originals stay.
+    /// Safest (default): clone a backup and verify it, move the original itself,
+    /// verify the moved file, then delete the backup. The organized file *is* the
+    /// original — creation date, tags, permissions and every other attribute intact.
+    Safest,
+    /// Fast: move. Same drive = an instant rename (metadata intact); another drive =
+    /// copy → verify → remove.
+    Fast,
+    /// Safer: verified copy; originals stay where they are.
     Copy,
+}
+
+impl Mode {
+    pub fn moves(self) -> bool {
+        self != Mode::Copy
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Safest => "safest",
+            Mode::Fast => "fast",
+            Mode::Copy => "copy",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -994,7 +1039,7 @@ pub fn execute(ops: &[Op], mode: Mode, link_back: bool, src_root: &Path, dest: &
         if progress.cancel.load(Ordering::Relaxed) {
             return;
         }
-        match place(op, mode, link_back) {
+        match place(op, mode, link_back, src_root) {
             Ok(mut e) => {
                 if !op.tags.is_empty() {
                     if cfg!(windows) {
@@ -1040,7 +1085,8 @@ pub fn execute(ops: &[Op], mode: Mode, link_back: bool, src_root: &Path, dest: &
         bytes: progress.bytes.load(Ordering::Relaxed),
         ..Default::default()
     };
-    if mode == Mode::Move {
+    let _ = std::fs::remove_dir(src_root.join(BACKUP_DIR));
+    if mode.moves() {
         report.removed_dirs = prune_empty(entries.iter().filter(|e| e.moved && !e.linked).map(|e| e.src.as_path()), src_root);
     }
     if !entries.is_empty() {
@@ -1051,49 +1097,107 @@ pub fn execute(ops: &[Op], mode: Mode, link_back: bool, src_root: &Path, dest: &
         while m.exists() {
             m = dest.join(format!(".insight-organize-{stamp}-{}.json", RUN.fetch_add(1, Ordering::Relaxed)));
         }
-        let json = serde_json::json!({ "version": 2, "mode": if mode == Mode::Move { "move" } else { "copy" }, "entries": entries });
+        let json = serde_json::json!({ "version": 2, "mode": mode.name(), "entries": entries });
         std::fs::write(&m, serde_json::to_vec_pretty(&json)?)?;
         report.manifest = Some(m);
     }
     Ok(report)
 }
 
-/// Copy (clone) to a temp name, fsync, rename, read back and compare hashes; then,
-/// for a move, remove the original (and optionally leave a link in its place).
-fn place(op: &Op, mode: Mode, link_back: bool) -> Result<Entry> {
+/// Safest-mode backups live here (inside the source, so on APFS they're free clones).
+pub const BACKUP_DIR: &str = ".insight-backup";
+
+/// Copy (APFS clone on the same drive) to a temp name, keep the modified time, fsync,
+/// rename into place, then read it back and compare with the original's hash.
+fn copy_verified(src: &Path, dst: &Path, src_hash: u128) -> Result<()> {
+    let tmp = dst.with_extension(format!("{}.part", dst.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()));
+    std::fs::copy(src, &tmp).with_context(|| format!("copy {}", src.display()))?;
+    {
+        let f = std::fs::File::options().write(true).open(&tmp)?;
+        if let Ok(t) = std::fs::metadata(src).and_then(|m| m.modified()) {
+            let _ = f.set_modified(t);
+        }
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, dst)?;
+    if hash_file(dst)? != src_hash {
+        let _ = std::fs::remove_file(dst);
+        anyhow::bail!("verification failed for {} — original kept", src.display());
+    }
+    Ok(())
+}
+
+/// Put one file in place according to `mode`. Nothing is ever lost: in every mode
+/// the original is only removed (or renamed away) once a verified copy exists.
+fn place(op: &Op, mode: Mode, link_back: bool, src_root: &Path) -> Result<Entry> {
     let src_hash = hash_file(&op.src)?;
     let existed = match std::fs::symlink_metadata(&op.dst) {
         Ok(m) if m.is_file() && m.len() == op.size && hash_file(&op.dst)? == src_hash => true,
         Ok(_) => anyhow::bail!("a different file already exists at {}", op.dst.display()),
         Err(_) => false,
     };
-    if !existed {
-        if let Some(d) = op.dst.parent() {
-            std::fs::create_dir_all(d)?;
+    if let Some(d) = op.dst.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let mut moved = false;
+    if existed {
+        if mode.moves() {
+            // An identical copy is already organized: the original is redundant.
+            std::fs::remove_file(&op.src).with_context(|| format!("remove original {}", op.src.display()))?;
+            moved = true;
         }
-        let tmp = op.dst.with_extension(format!("{}.part", op.dst.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()));
-        // std::fs::copy clones on APFS: same-drive copies are instant and share storage.
-        std::fs::copy(&op.src, &tmp).with_context(|| format!("copy {}", op.src.display()))?;
-        {
-            let f = std::fs::File::options().write(true).open(&tmp)?;
-            if let Ok(t) = std::fs::metadata(&op.src).and_then(|m| m.modified()) {
-                let _ = f.set_modified(t);
+    } else {
+        match mode {
+            Mode::Copy => copy_verified(&op.src, &op.dst, src_hash)?,
+            Mode::Fast => {
+                if std::fs::rename(&op.src, &op.dst).is_err() {
+                    // Different drive: copy → verify → remove.
+                    copy_verified(&op.src, &op.dst, src_hash)?;
+                    std::fs::remove_file(&op.src)?;
+                }
+                moved = true;
             }
-            f.sync_all()?;
-        }
-        std::fs::rename(&tmp, &op.dst)?;
-        if hash_file(&op.dst)? != src_hash {
-            let _ = std::fs::remove_file(&op.dst);
-            anyhow::bail!("verification failed for {} — original kept", op.src.display());
+            Mode::Safest => {
+                // 1. A verified safety clone of the original.
+                static N: AtomicU64 = AtomicU64::new(0);
+                let backup_dir = src_root.join(BACKUP_DIR);
+                std::fs::create_dir_all(&backup_dir)?;
+                let backup = backup_dir.join(format!("{}-{}", N.fetch_add(1, Ordering::Relaxed), op.src.file_name().unwrap_or_default().to_string_lossy()));
+                std::fs::copy(&op.src, &backup).with_context(|| format!("backup {}", op.src.display()))?;
+                if hash_file(&backup)? != src_hash {
+                    let _ = std::fs::remove_file(&backup);
+                    anyhow::bail!("backup of {} didn't verify — nothing moved", op.src.display());
+                }
+                // 2. Move the original itself (same drive: rename keeps every attribute).
+                let r: Result<()> = (|| {
+                    if std::fs::rename(&op.src, &op.dst).is_err() {
+                        copy_verified(&op.src, &op.dst, src_hash)?;
+                        std::fs::remove_file(&op.src)?;
+                    }
+                    // 3. Verify the moved file.
+                    if hash_file(&op.dst)? != src_hash {
+                        anyhow::bail!("moved file {} doesn't verify", op.dst.display());
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = r {
+                    // Put the original back from the safety clone.
+                    if !op.src.exists() {
+                        let _ = std::fs::rename(&backup, &op.src).or_else(|_| std::fs::copy(&backup, &op.src).map(|_| ()));
+                    }
+                    let _ = std::fs::remove_file(&op.dst);
+                    let _ = std::fs::remove_file(&backup);
+                    return Err(e.context("original restored from its backup"));
+                }
+                // 4. Done: drop the safety clone.
+                std::fs::remove_file(&backup)?;
+                moved = true;
+            }
         }
     }
-    let mut e = Entry { src: op.src.clone(), dst: op.dst.clone(), zip_name: None, hash: format!("{src_hash:032x}"), moved: false, linked: false, existed, sidecar: None };
-    if mode == Mode::Move {
-        std::fs::remove_file(&op.src).with_context(|| format!("remove original {}", op.src.display()))?;
-        e.moved = true;
-        if link_back {
-            e.linked = make_link(&op.dst, &op.src).is_ok();
-        }
+    let mut e = Entry { src: op.src.clone(), dst: op.dst.clone(), zip_name: None, hash: format!("{src_hash:032x}"), moved, linked: false, existed, sidecar: None };
+    if moved && link_back {
+        e.linked = make_link(&op.dst, &op.src).is_ok();
     }
     Ok(e)
 }
@@ -1161,7 +1265,7 @@ fn zip_members(zpath: &Path, members: &[&Op], mode: Mode, progress: &Progress) -
     let mut out = Vec::new();
     for (m, name, h) in planned {
         let mut e = Entry { src: m.src.clone(), dst: zpath.to_path_buf(), zip_name: Some(name), hash: format!("{h:032x}"), moved: false, linked: false, existed, sidecar: None };
-        if mode == Mode::Move {
+        if mode.moves() {
             std::fs::remove_file(&m.src)?;
             e.moved = true;
         }
@@ -1473,6 +1577,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Safest and Fast move the original file itself: same inode, same creation
+    /// date, same extended attributes; the safety backup is gone afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn moves_keep_the_original_file() {
+        use std::os::unix::fs::MetadataExt;
+        for mode in [Mode::Safest, Mode::Fast] {
+            let root = std::env::temp_dir().join(format!("insight-ino-{}-{}", std::process::id(), mode.name()));
+            let _ = std::fs::remove_dir_all(&root);
+            let src = root.join("card");
+            std::fs::create_dir_all(&src).unwrap();
+            let f = src.join("IMG_9.JPG");
+            std::fs::write(&f, vec![9u8; 3000]).unwrap();
+            let before = std::fs::metadata(&f).unwrap();
+            let dest = root.join("Organized");
+            let ops = vec![Op { src: f.clone(), dst: dest.join("2025/e/Cam/JPG/IMG_9.JPG"), zip: false, size: 3000, tags: vec![] }];
+            let r = execute(&ops, mode, false, &src, &dest, &Progress::default()).unwrap();
+            assert_eq!(r.moved, 1, "{mode:?}");
+            let after = std::fs::metadata(dest.join("2025/e/Cam/JPG/IMG_9.JPG")).unwrap();
+            assert_eq!(after.ino(), before.ino(), "{mode:?}: the organized file is the original file");
+            assert_eq!(after.created().ok(), before.created().ok(), "{mode:?}: creation date kept");
+            assert!(!f.exists());
+            assert!(!src.join(BACKUP_DIR).exists(), "safety backup removed");
+            undo(&r.manifest.unwrap()).unwrap();
+            assert_eq!(std::fs::metadata(&f).unwrap().ino(), before.ino(), "undo moves the same file back");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
     #[test]
     fn move_verify_link_undo() {
         let root = std::env::temp_dir().join(format!("insight-mv-{}", std::process::id()));
@@ -1488,7 +1621,7 @@ mod tests {
             Op { src: src.join("DCIM/100CANON/b.JPG"), dst: dest.join("2025/e/Cam/JPG/b_x.JPG"), zip: false, size: 2000, tags: vec![] },
         ];
         let p = Progress::default();
-        let r = execute(&ops, Mode::Move, true, &src, &dest, &p).unwrap();
+        let r = execute(&ops, Mode::Safest, true, &src, &dest, &p).unwrap();
         assert!(r.failed.is_empty(), "{:?}", r.failed);
         assert_eq!((r.placed, r.moved), (2, 2));
         // The JPG now lives in the destination; a link at the old path points to it.
@@ -1505,7 +1638,7 @@ mod tests {
         assert_eq!(std::fs::read(&old).unwrap(), vec![4u8; 2000]);
         assert!(!dest.join("2025").exists());
         // Move without links: emptied card folders are pruned (but not the card root).
-        let r = execute(&ops, Mode::Move, false, &src, &dest, &p).unwrap();
+        let r = execute(&ops, Mode::Fast, false, &src, &dest, &p).unwrap();
         assert_eq!(r.moved, 2);
         assert!(!src.join("DCIM").exists(), "empty DCIM/100CANON removed");
         assert!(src.exists());

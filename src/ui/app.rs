@@ -144,6 +144,8 @@ pub struct InsightApp {
     pub media_browse_at: f64,
     pub media_map: super::folder_map::FolderMap,
     pub organize: super::organize_view::OrganizeUi,
+    /// Native folder dialog shared by Media / Organize.
+    pub picker: super::picker::FolderPicker,
 
     // Settings edit buffers
     pub new_root: String,
@@ -239,6 +241,7 @@ impl InsightApp {
             media_browse_at: 0.0,
             media_map: Default::default(),
             organize: super::organize_view::OrganizeUi::new(),
+            picker: Default::default(),
             new_root: String::new(),
             new_exclude: String::new(),
             confirm_trash: None,

@@ -196,7 +196,7 @@ fn tools_cli(cmd: &str, _args: &[String]) {
                 let _ = std::fs::write(dest.with_extension("plan.tsv"), list.join("\n"));
             }
             let flag = |f: &str| _args.iter().any(|a| a == f);
-            let mode = if flag("--copy") { organize::Mode::Copy } else { organize::Mode::Move };
+            let mode = if flag("--copy") { organize::Mode::Copy } else if flag("--fast") { organize::Mode::Fast } else { organize::Mode::Safest };
             match organize::execute(&ops, mode, flag("--link-back"), &src, &dest, &p) {
                 Ok(r) => println!(
                     "placed {} · moved {} · linked {} · already there {} · failed {} · emptied dirs {} · manifest {:?}",

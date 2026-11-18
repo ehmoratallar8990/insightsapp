@@ -216,11 +216,16 @@ Measured on a MacBook Pro (Apple M4 Pro, 12 cores, 24 GB, macOS 27), indexing th
 - **Planned folders map:** a zoomable treemap (like the storage map) of exactly what will be created,
   `Organized › 2025 › 2025-09-12 Lisbon trip › Day 1 › Canon EOS R8 › RAW`. It updates live as you rename,
   merge or toggle options.
-- **Move, verified (default):** everything ends up in the destination. Each file is copied to a temporary name,
-  fsynced, renamed, read back and compared with the original's content hash (xxh3-128). Only then is the
-  original removed. Zipped RAWs are verified member by member. Folders the move leaves empty are removed.
-  On the same drive, copies are APFS clones, so a move needs **no extra space**. To another drive, each
-  original is freed as soon as its copy verifies.
+- **Three transfer methods:**
+  - **🛡 Safest (default):** clone a backup and verify it, **move the original file itself**, verify the moved
+    file against the original's content hash (xxh3-128), then delete the backup. Because the organized file *is*
+    the original, its creation date, modified date, Finder tags and other extended attributes are untouched.
+    Verified on 2,070 real files: same inode, creation date, modified date and attributes for every file.
+    On the same drive the safety clone is free (APFS).
+  - **⚡ Fast:** move. On the same drive that's an instant rename (metadata intact); on another drive it's
+    copy → verify → remove.
+  - **📋 Copy:** verified copies, originals stay. Copies are new files, so their creation date is today.
+  Folders a move leaves empty are removed; zipped RAWs are verified member by member before originals go.
 - **Links back** (off by default): after a move, a symlink at each original path points to the file's new home,
   so other apps' old paths keep working. On Windows without Developer Mode a hard link is used instead (no extra space either).
 - **Copy mode:** the same verified copy, keeping the originals.
@@ -348,7 +353,7 @@ cargo test --release                   # unit tests (walker, index, query engine
 ./target/release/insight --apps                       # installed apps + leftovers
 ./target/release/insight --update-check               # is a newer release available?
 ./target/release/insight --organize-preview ~/Pictures/Card  # photo-organizer plan (read-only)
-./target/release/insight --organize-run <src> <dest> [--copy] [--link-back] [--zip]   # run it
+./target/release/insight --organize-run <src> <dest> [--fast|--copy] [--link-back] [--zip]   # run it (default: safest)
 ./target/release/insight --organize-undo <dest>               # put everything back
 ```
 

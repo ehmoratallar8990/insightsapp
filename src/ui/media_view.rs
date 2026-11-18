@@ -12,6 +12,11 @@ use egui::{Align2, Color32, CornerRadius, FontId, Id, Rect, Sense, Stroke, Strok
 
 impl InsightApp {
     pub fn media_page(&mut self, ui: &mut Ui) {
+        if self.picker.target == 3 {
+            if let Some((_, p)) = self.picker.poll() {
+                self.settings.media_scope = p;
+            }
+        }
         let pal = self.pal;
         self.media.prepare();
         // Pick up semantic search results.
@@ -157,6 +162,10 @@ impl InsightApp {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Photos in").color(MUTED));
                         ui.add(egui::TextEdit::singleline(&mut self.settings.media_scope).desired_width(300.0));
+                        if theme::ghost_button(ui, if self.picker.busy() && self.picker.target == 3 { "Choosing…" } else { "Choose…" }).clicked() {
+                            let start = self.settings.media_scope.clone();
+                            self.picker.open(ui.ctx(), 3, "Choose a folder of photos", &start);
+                        }
                         if theme::chip(ui, "📁 Folder map", self.media_browse, pal.accent2, Id::unique("media-browse")).clicked() {
                             self.media_browse = !self.media_browse;
                             self.media_browse_at = ui.input(|i| i.time);
