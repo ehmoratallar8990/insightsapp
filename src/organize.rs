@@ -1635,7 +1635,7 @@ mod tests {
         assert_eq!(ev[0].folder(), "2024-07-14 Wedding");
         assert_eq!(ev[1].name, "Morning");
         let ops = build_ops(&scan, &ev, &opts, Path::new("/dest"));
-        let dsts: Vec<String> = ops.iter().map(|o| o.dst.display().to_string()).collect();
+        let dsts: Vec<String> = ops.iter().map(|o| o.dst.display().to_string().replace('\\', "/")).collect();
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/Canon EOS R8/RAW/IMG_1.CR3".to_string()));
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/Canon EOS R8/JPG/IMG_1.JPG".to_string()));
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/iPhone 15 Pro/HEIC/IMG_9.HEIC".to_string()));
@@ -1651,7 +1651,7 @@ mod tests {
         let mut ev2 = ev.clone();
         ev2[0].by_day = true;
         let ops = build_ops(&scan2, &ev2, &Options::default(), Path::new("/dest"));
-        let dsts: Vec<String> = ops.iter().map(|o| o.dst.display().to_string()).collect();
+        let dsts: Vec<String> = ops.iter().map(|o| o.dst.display().to_string().replace('\\', "/")).collect();
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/Day 1 - 2024-07-14/Canon EOS R8/RAW/IMG_1_bride-and-groom.CR3".to_string()), "{dsts:?}");
         assert!(dsts.contains(&"/dest/2024/2024-07-14 Wedding/Day 1 - 2024-07-14/iPhone 15 Pro/Rejects/IMG_9_wedding.HEIC".to_string()), "{dsts:?}");
         // Zip RAWs, JPEG only off, renamed camera.
@@ -1659,7 +1659,7 @@ mod tests {
         o2.formats[1] = false;
         o2.camera_names.insert("Canon EOS R8".into(), "R8".into());
         let ops = build_ops(&scan, &ev, &o2, Path::new("/dest"));
-        assert!(ops.iter().all(|o| o.dst.to_string_lossy().contains("/R8/") || o.dst.to_string_lossy().contains("iPhone")));
+        assert!(ops.iter().all(|o| o.dst.to_string_lossy().replace('\\', "/").contains("/R8/") || o.dst.to_string_lossy().contains("iPhone")));
         assert_eq!(ops.iter().filter(|o| o.zip).count(), 2);
         assert!(ops.iter().all(|o| !o.dst.to_string_lossy().ends_with(".JPG")));
     }
